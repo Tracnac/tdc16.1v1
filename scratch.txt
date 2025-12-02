@@ -1,0 +1,28 @@
+// Addition
+wire [32:0] sum = A + B;
+assign C_flag = sum[32];        // Natural! Bit 32 is the carry out
+
+// Subtraction  
+wire [32:0] diff = A - B;
+assign C_flag = ~diff[32];      // Borrow = carry in subtraction
+```
+
+## The Benefits for FPGA Implementation
+
+1. **Intuitive**: Carry out from ALU → Carry flag = 1. Done.
+2. **Debugging**: When you see C=1 in simulation, you *know* a carry happened
+3. **Less mental overhead**: No constant "wait, do I invert here?"
+4. **Standard references**: All the classic computer architecture textbooks use this convention
+
+## Handling Conditional Branches
+
+You'd just flip the condition names:
+```
+BHS (unsigned >=)  →  check C == 0  (no borrow)
+BLO (unsigned <)   →  check C == 1  (borrow occurred)
+```
+
+Or better yet, if this is your own instruction set, use clearer mnemonics:
+```
+BGE  - Branch if Greater or Equal (C=0)
+BLT  - Branch if Less Than (C=1)

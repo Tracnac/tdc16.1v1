@@ -10,11 +10,4 @@ pub fn main() !void {
 
     var cpu = try tdc16_1v1.CPU.init(allocator);
     defer cpu.deinit(allocator);
-
-    cpu.registers.PC = 0x1000;
-    cpu.ram.write8(0, 0xFF);
-
-    for (0..16) |i| {
-        std.debug.print("CPU: R{d} {d}\n", .{ i, cpu.registers.asArray()[i] });
-    }
 }

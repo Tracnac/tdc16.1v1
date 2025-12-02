@@ -2,7 +2,6 @@ const std = @import("std");
 const native_endian = @import("builtin").target.cpu.arch.endian();
 const expect = std.testing.expect;
 
-// I'm not using the native endian here, I emulate a FPGA that is big-endian...
 const memory_endian = .big;
 
 pub const Ram = struct {

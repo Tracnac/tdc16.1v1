@@ -4,7 +4,7 @@ const native_endian = @import("builtin").target.cpu.arch.endian();
 const expect = std.testing.expect;
 const Ram = @import("memory.zig").Ram;
 const Rom = @import("memory.zig").Rom;
-const Instruction = @import("instruction.zig").Instruction;
+pub const Instruction = @import("instruction.zig").Instruction;
 
 pub const CPU = struct {
     registers: Registers,
@@ -46,6 +46,11 @@ pub const CPU = struct {
 
         return Instruction{ .raw = raw };
     }
+
+    pub fn step(self: *CPU) !void {
+        const instruction = self.fetch();
+        try instruction.execute(self);
+    }
 };
 
 pub const Registers = struct {
@@ -68,6 +73,15 @@ pub const Registers = struct {
 
     pub fn asArray(self: *Registers) *[16]u16 {
         return @ptrCast(self);
+    }
+
+    pub fn writeRegister(self: *Registers, index: u4, value: u16) void {
+        if (index == 0) return;
+        self.asArray()[index] = value;
+    }
+
+    pub fn readRegister(self: *Registers, index: u4) u16 {
+        return self.asArray()[index];
     }
 
     pub fn pushSP(self: *Registers, value: u16) void {
@@ -148,6 +162,14 @@ pub const SRType = packed union {
         self.raw ^= (@as(u16, 1) << bit);
     }
 
+    pub fn updateFlag(self: *SRType, flag: SRFlags, value: bool) void {
+        const bit: u4 = @intFromEnum(flag);
+        if (value) {
+            self.raw |= (@as(u16, 1) << bit);
+        } else {
+            self.raw &= ~(@as(u16, 1) << bit);
+        }
+    }
     // Update N and Z flags based on result
     pub fn updateNZ(self: *SRType, result: u16) void {
         self.flags.N = (result & 0x8000) != 0; // Bit 15 = negative
@@ -155,42 +177,80 @@ pub const SRType = packed union {
     }
 
     // Update C and V flags for addition
-    pub fn updateCV_Add(self: *SRType, a: u16, b: u16, result: u32) void {
-        self.flags.C = (result > 0xFFFF); // Carry out
-        // Overflow: both operands same sign, result different sign
-        const sign_a = (a & 0x8000) != 0;
-        const sign_b = (b & 0x8000) != 0;
-        const sign_result = (result & 0x8000) != 0;
-        self.flags.V = (sign_a == sign_b) and (sign_a != sign_result);
+    // ADD Rd, Rs, imm  →  Rd = Rs + imm
+    pub fn updateCV_Add(self: *SRType, rs: u16, operand: u16, result: u32) void {
+        // Carry: unsigned overflow (result exceeds 16 bits)
+        self.flags.C = (result > 0xFFFF);
+
+        // Overflow: signed overflow occurs when:
+        // - Both operands have the same sign, AND
+        // - Result has a different sign
+        const rs_negative = (rs & 0x8000) != 0;
+        const operand_negative = (operand & 0x8000) != 0;
+        const result_negative = (result & 0x8000) != 0;
+        self.flags.V = (rs_negative == operand_negative) and (rs_negative != result_negative);
     }
 
-    // Update C and V flags for subtraction
-    pub fn updateCV_Sub(self: *SRType, a: u16, b: u16, result: u32) void {
-        self.flags.C = (result > 0xFFFF); // Borrow
-        // Overflow: operands different sign, result different from minuend
-        const sign_a = (a & 0x8000) != 0;
-        const sign_b = (b & 0x8000) != 0;
-        const sign_result = (result & 0x8000) != 0;
-        self.flags.V = (sign_a != sign_b) and (sign_a != sign_result);
+    // Update C and V flags for subtraction (ARM-style: C=1 means NO borrow)
+    // SUB Rd, Rs, imm  →  Rd = Rd - Rs  or  Rd = Rd - imm
+    pub fn updateCV_Sub(self: *SRType, rd: u16, operand: u16, result: u32) void {
+        // ARM-style: C=1 means NO borrow, C=0 means borrow occurred
+        // No borrow when rd >= operand (sufficient to subtract)
+        self.flags.C = (rd >= operand);
+
+        // Overflow: signed overflow occurs when:
+        // - Operands have different signs, AND
+        // - Result has different sign from rd (minuend)
+        const rd_negative = (rd & 0x8000) != 0;
+        const operand_negative = (operand & 0x8000) != 0;
+        const result_negative = (result & 0x8000) != 0;
+        self.flags.V = (rd_negative != operand_negative) and (rd_negative != result_negative);
     }
 
     // Update all arithmetic flags at once
-    pub fn updateFlags(self: *SRType, a: u16, b: u16, result: u32, is_add: bool) void {
+    pub fn updateArithmeticFlags(self: *SRType, rd: u16, rs_or_operand: u16, result: u32, is_add: bool) void {
         self.updateNZ(@truncate(result));
         if (is_add) {
-            self.updateCV_Add(a, b, result);
+            self.updateCV_Add(rd, rs_or_operand, result);
         } else {
-            self.updateCV_Sub(a, b, result);
+            self.updateCV_Sub(rd, rs_or_operand, result);
         }
+    }
+
+    // Clear C and V flags (used by logical operations: AND, OR, XOR)
+    pub fn clearCV(self: *SRType) void {
+        self.flags.C = false;
+        self.flags.V = false;
+    }
+
+    // Update flags for shift/rotate operations
+    pub fn updateShiftRotateFlags(self: *SRType, result: u16, carry_out: bool) void {
+        self.updateNZ(result);
+        self.flags.C = carry_out;
+        self.flags.V = false; // V is cleared for shift/rotate operations
+    }
+
+    // Update flags for multiplication
+    // MUL Rd, Rs, imm  →  Rd = Rs * imm
+    pub fn updateMultiplyFlags(self: *SRType, result: u16, overflow: bool) void {
+        self.updateNZ(result);
+        self.flags.V = overflow; // Set if result doesn't fit in 16 bits
+    }
+
+    // Update flags for division
+    // DIV Rd, Rs  →  Rd = Rd / Rs
+    pub fn updateDivideFlags(self: *SRType, quotient: u16, divide_by_zero: bool) void {
+        self.updateNZ(quotient);
+        self.flags.V = divide_by_zero; // Set on divide-by-zero
     }
 };
 
-pub const Trap = enum(u16) {
+pub const Trap = enum(u5) {
     Stack_error = 0,
     Division_by_zero,
     Illegal_instruction,
     Illegal_memory_access,
-    Alignment_fault,
+    Bus_error,
 };
 
 test "Flags Offsets and Bytes align" {
@@ -517,7 +577,7 @@ test "SRType updateCV_Sub with borrow" {
     const result: u32 = @as(u32, a) -% @as(u32, b);
 
     sr.updateCV_Sub(a, b, result);
-    try expect(sr.flags.C == true); // Borrow occurred
+    try expect(sr.flags.C == false); // Borrow occurred
 }
 
 test "SRType updateFlags for addition" {
@@ -526,17 +586,21 @@ test "SRType updateFlags for addition" {
     const b: u16 = 0x0001;
     const result: u32 = @as(u32, a) + @as(u32, b);
 
-    sr.updateFlags(a, b, result, true);
+    sr.updateArithmeticFlags(a, b, result, true);
     try expect(sr.flags.Z == true); // Result is 0 (wrapped)
     try expect(sr.flags.C == true); // Carry occurred
 }
 
 test "Trap enum values" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
     try expect(@intFromEnum(Trap.Stack_error) == 0);
     try expect(@intFromEnum(Trap.Division_by_zero) == 1);
     try expect(@intFromEnum(Trap.Illegal_instruction) == 2);
     try expect(@intFromEnum(Trap.Illegal_memory_access) == 3);
-    try expect(@intFromEnum(Trap.Alignment_fault) == 4);
+    try expect(@intFromEnum(Trap.Bus_error) == 4);
 }
 
 test "readOpcode increments PC" {
@@ -547,7 +611,7 @@ test "readOpcode increments PC" {
     cpu.ram.write32(0, 0x12345678);
     cpu.registers.PC = 0;
 
-    const instr = cpu.fetch();
-    try expect(instr.raw == 0x12345678);
+    const fetch = cpu.fetch();
+    try expect(fetch.raw == 0x12345678);
     try expect(cpu.registers.PC == 4);
 }

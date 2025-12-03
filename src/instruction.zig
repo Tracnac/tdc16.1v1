@@ -99,11 +99,14 @@ pub const Instruction = packed union {
     pub fn execute(self: Instruction, cpu: *CPU) !void {
         switch (self.bytecode.opcode) {
             @intFromEnum(Opcode.ADD) => try ADD(cpu, self),
+            @intFromEnum(Opcode.SUB) => try SUB(cpu, self),
+            @intFromEnum(Opcode.MUL) => try MUL(cpu, self),
+            @intFromEnum(Opcode.DIV) => try DIV(cpu, self),
         }
     }
 
     fn ADD(cpu: *CPU, instruction: Instruction) !void {
-        // LOAD/STORE archictecture all ALU are registers only.
+        // LOAD/STORE architecture all ALU are registers only.
         if (instruction.bytecode.mode == @intFromEnum(Mode.OFFSET_INDEXED)) {
             // SR = Trap ERROR.
             cpu.registers.SR.raw = @intFromEnum(Trap.Illegal_instruction);
@@ -115,25 +118,57 @@ pub const Instruction = packed union {
         // ADD Rd, IMM16        => Rd = Rd + IMM16
         // ADD Rd, Rs           => Rd = Rd + Rs
         // ADD Rd, Rs, IMM16    => Rd = Rs + IMM16
-        // ADD Rd, Rs, 0        => Defined behavior, but inexpected result !
+        // ADD Rd, Rs, 0        => Defined behavior, but unexpected result! (Maybe better to reject parser side!?)
+
+        // Can take the X form ADDX (When flag X is set ADD behave like ADC)
 
         const first_operand: u16 = if (instruction.bytecode.imm16 != 0) cpu.registers.readRegister(instruction.bytecode.rs) else cpu.registers.readRegister(instruction.bytecode.rd);
         const second_operand: u16 = if (instruction.bytecode.imm16 != 0) instruction.bytecode.imm16 else cpu.registers.readRegister(instruction.bytecode.rs);
 
-        const result = @addWithOverflow(first_operand, second_operand);
-        // Update flags
-        cpu.registers.SR.updateFlag(.N, (result[0] & 0x8000) != 0);
-        cpu.registers.SR.updateFlag(.Z, result[0] == 0);
-        cpu.registers.SR.updateFlag(.C, result[1] != 0);
-        // cpu.registers.SR.updateFlag(.V, (result[1] == 0));
+        // Check if ADDX (Add with Carry)
+        if (cpu.registers.SR.getFlag(.X)) {
+            // ADDX: Add with carry
+            const carry_in: u16 = if (cpu.registers.SR.getFlag(.C)) 1 else 0;
 
-        // a + b ; (a + b) < a ; (sign(a)==sign(b)) and (sign(r)!=sign(a))
-        const first_negative = (first_operand & 0x8000) != 0;
-        const second_negative = (second_operand & 0x8000) != 0;
-        const result_negative = (result[0] & 0x8000) != 0;
-        cpu.registers.SR.updateFlag(.V, (first_negative == second_negative) and (first_negative != result_negative));
+            // First addition: first_operand + second_operand
+            const temp_result = @addWithOverflow(first_operand, second_operand);
 
-        cpu.registers.writeRegister(instruction.bytecode.rd, result[0]);
+            // Second addition: temp_result + carry
+            const final_result = @addWithOverflow(temp_result[0], carry_in);
+
+            // Carry out = carry from first add OR carry from second add
+            const carry_out = (temp_result[1] != 0) or (final_result[1] != 0);
+
+            // Update flags
+            cpu.registers.SR.updateFlag(.N, (final_result[0] & 0x8000) != 0);
+            cpu.registers.SR.updateFlag(.Z, final_result[0] == 0);
+            cpu.registers.SR.updateFlag(.C, carry_out);
+
+            // Overflow: check if signs of operands are same and result sign differs
+            const first_negative = (first_operand & 0x8000) != 0;
+            const second_negative = (second_operand & 0x8000) != 0;
+            const result_negative = (final_result[0] & 0x8000) != 0;
+            cpu.registers.SR.updateFlag(.V, (first_negative == second_negative) and (first_negative != result_negative));
+
+            cpu.registers.writeRegister(instruction.bytecode.rd, final_result[0]);
+            cpu.registers.SR.clearFlag(.X); // Clear X flag after ADDX
+        } else {
+            // Normal ADD
+            const result = @addWithOverflow(first_operand, second_operand);
+
+            // Update flags
+            cpu.registers.SR.updateFlag(.N, (result[0] & 0x8000) != 0);
+            cpu.registers.SR.updateFlag(.Z, result[0] == 0);
+            cpu.registers.SR.updateFlag(.C, result[1] != 0);
+
+            // a + b ; (a + b) < a ; (sign(a)==sign(b)) and (sign(r)!=sign(a))
+            const first_negative = (first_operand & 0x8000) != 0;
+            const second_negative = (second_operand & 0x8000) != 0;
+            const result_negative = (result[0] & 0x8000) != 0;
+            cpu.registers.SR.updateFlag(.V, (first_negative == second_negative) and (first_negative != result_negative));
+
+            cpu.registers.writeRegister(instruction.bytecode.rd, result[0]);
+        }
     }
 
     fn SUB(cpu: *CPU, instruction: Instruction) !void {
@@ -149,48 +184,107 @@ pub const Instruction = packed union {
         // SUB Rd, Rs, IMM16    => Rd = Rs - IMM16
         // SUB Rd, Rs, 0        => Defined behavior, but unexpected result! (Maybe better to reject parser side!?)
 
+        // Can take the X form SUBX (When flag X is set SUB behave like SBC)
+
         const first_operand: u16 = if (instruction.bytecode.imm16 != 0) cpu.registers.readRegister(instruction.bytecode.rs) else cpu.registers.readRegister(instruction.bytecode.rd);
         const second_operand: u16 = if (instruction.bytecode.imm16 != 0) instruction.bytecode.imm16 else cpu.registers.readRegister(instruction.bytecode.rs);
 
-        const result = @subWithOverflow(first_operand, second_operand);
-        // _ = res;
-        // // Use i32 to properly detect borrow
-        // const diff: i32 = @as(i32, first_operand) - @as(i32, second_operand);
-        // const result: u16 = @bitCast(@as(i16, @truncate(diff)));
+        // Check if SUBX (Subtract with Borrow)
+        if (cpu.registers.SR.getFlag(.X)) {
+            // SUBX: Subtract with borrow
+            const borrow_in: u16 = if (cpu.registers.SR.getFlag(.C)) 1 else 0;
 
-        // Update flags
-        cpu.registers.SR.updateFlag(.N, (result[0] & 0x8000) != 0);
-        cpu.registers.SR.updateFlag(.Z, result[0] == 0);
-        cpu.registers.SR.updateFlag(.C, (result[1] != 0));
+            // First subtraction: first_operand - second_operand
+            const temp_result = @subWithOverflow(first_operand, second_operand);
 
-        // a - b ; a < b ; (sign(a)!=sign(b)) and (sign(r)!=sign(a))
-        const first_negative = (first_operand & 0x8000) != 0;
-        const second_negative = (second_operand & 0x8000) != 0;
-        const result_negative = (result[0] & 0x8000) != 0;
-        cpu.registers.SR.updateFlag(.V, (first_negative != second_negative) and (first_negative != result_negative));
+            // Second subtraction: temp_result - borrow
+            const final_result = @subWithOverflow(temp_result[0], borrow_in);
 
-        cpu.registers.writeRegister(instruction.bytecode.rd, result[0]);
+            // Borrow out = borrow from first sub OR borrow from second sub
+            const borrow_out = (temp_result[1] != 0) or (final_result[1] != 0);
+
+            // Update flags
+            cpu.registers.SR.updateFlag(.N, (final_result[0] & 0x8000) != 0);
+            cpu.registers.SR.updateFlag(.Z, final_result[0] == 0);
+            cpu.registers.SR.updateFlag(.C, borrow_out);
+
+            // Overflow: check if signs of operands differ and result sign differs from first operand
+            const first_negative = (first_operand & 0x8000) != 0;
+            const second_negative = (second_operand & 0x8000) != 0;
+            const result_negative = (final_result[0] & 0x8000) != 0;
+            cpu.registers.SR.updateFlag(.V, (first_negative != second_negative) and (first_negative != result_negative));
+
+            cpu.registers.writeRegister(instruction.bytecode.rd, final_result[0]);
+            cpu.registers.SR.clearFlag(.X); // Clear X flag after SUBX
+        } else {
+            // Normal SUB
+            const result = @subWithOverflow(first_operand, second_operand);
+
+            // Update flags
+            cpu.registers.SR.updateFlag(.N, (result[0] & 0x8000) != 0);
+            cpu.registers.SR.updateFlag(.Z, result[0] == 0);
+            cpu.registers.SR.updateFlag(.C, (result[1] != 0));
+
+            // a - b ; a < b ; (sign(a)!=sign(b)) and (sign(r)!=sign(a))
+            const first_negative = (first_operand & 0x8000) != 0;
+            const second_negative = (second_operand & 0x8000) != 0;
+            const result_negative = (result[0] & 0x8000) != 0;
+            cpu.registers.SR.updateFlag(.V, (first_negative != second_negative) and (first_negative != result_negative));
+
+            cpu.registers.writeRegister(instruction.bytecode.rd, result[0]);
+        }
     }
 
     fn MUL(cpu: *CPU, instruction: Instruction) !void {
-        const rd_index = instruction.bytecode.rd;
-        const rs_index = instruction.bytecode.rs;
-        const imm16: u16 = instruction.bytecode.imm16;
+        // LOAD/STORE architecture all ALU are registers only.
+        if (instruction.bytecode.mode == @intFromEnum(Mode.OFFSET_INDEXED)) {
+            cpu.registers.SR.setFlag(.T);
+            return;
+        }
+
+        // MUL Rd, IMM16        => Rd = Rd * IMM16
+        // MUL Rd, Rs           => Rd = Rd * Rs
+        // MUL Rd, Rs, IMM16    => Rd = Rs * IMM16
+        // MUL Rd, Rs, 0        => Defined behavior, but unexpected result! (Maybe better to reject parser side!?)
+
+        // MULX Rd, Rs          => Rd = Rd * Rs     => Rd:HI Rs:LO ; 32-bit operation
+        const first_operand: u16 = if (instruction.bytecode.imm16 != 0) cpu.registers.readRegister(instruction.bytecode.rs) else cpu.registers.readRegister(instruction.bytecode.rd);
+        const second_operand: u16 = if (instruction.bytecode.imm16 != 0) instruction.bytecode.imm16 else cpu.registers.readRegister(instruction.bytecode.rs);
 
         if (instruction.bytecode.mode == @intFromEnum(Mode.REGISTER_IMM16)) {
             // MUL Rd, Rs, imm16 → Rd = Rs * imm16
-            const rs: u16 = cpu.registers.asArray()[rs_index];
-            const product: u32 = @as(u32, rs) * @as(u32, imm16);
 
-            // Check for overflow (result doesn't fit in 16 bits)
-            const overflow = (product > 0xFFFF);
+            // Check for MULX instruction
+            if (!cpu.registers.SR.getFlag(.X)) {
+                const product: u32 = @as(u32, first_operand) * @as(u32, second_operand);
+                const result: u16 = @truncate(product);
 
-            // Update flags (N, Z, V)
-            cpu.registers.SR.updateMultiplyFlags(@truncate(product), overflow);
+                // Update flags (N, Z, V)
+                cpu.registers.SR.updateFlag(.N, (result & 0x8000) != 0);
+                cpu.registers.SR.updateFlag(.Z, result == 0);
+                cpu.registers.SR.updateFlag(.V, product > 0xFFFF);
+                cpu.registers.SR.updateFlag(.C, product > 0xFFFF);
+                if (instruction.bytecode.rd != 0) {
+                    cpu.registers.writeRegister(instruction.bytecode.rd, result);
+                }
+            } else {
+                // MULX: Multiplication 16×16 → 32 bits
+                const product_32: u32 = @as(u32, first_operand) * @as(u32, second_operand);
+                const result_lo: u16 = @truncate(product_32); // 16 bits inférieurs
+                const result_hi: u16 = @truncate(product_32 >> 16); // 16 bits supérieurs
 
-            // Write result to Rd (unless Rd is R0, which is always zero)
-            if (rd_index != 0) {
-                cpu.registers.asArray()[rd_index] = @truncate(product);
+                // Flags basés sur le résultat 32 bits complet
+                cpu.registers.SR.updateFlag(.N, (product_32 & 0x80000000) != 0);
+                cpu.registers.SR.updateFlag(.Z, product_32 == 0);
+                cpu.registers.SR.updateFlag(.V, result_hi != 0); // Overflow si partie haute non-nulle
+                cpu.registers.SR.updateFlag(.C, result_hi != 0);
+
+                // Write result to Rd:Rs (Rd=high, Rs=low)
+                if (instruction.bytecode.rd != 0) {
+                    cpu.registers.writeRegister(instruction.bytecode.rd, result_hi);
+                    cpu.registers.writeRegister(instruction.bytecode.rs, result_lo);
+                    cpu.registers.SR.clearFlag(.X);
+                }
             }
         } else {
             // Illegal instruction - set T flag and return error
@@ -199,33 +293,45 @@ pub const Instruction = packed union {
     }
 
     fn DIV(cpu: *CPU, instruction: Instruction) !void {
-        const rd_index = instruction.bytecode.rd;
-        const rs_index = instruction.bytecode.rs;
-        const imm16: u16 = instruction.bytecode.imm16;
+        // LOAD/STORE architecture all ALU are registers only.
+        if (instruction.bytecode.mode == @intFromEnum(Mode.OFFSET_INDEXED)) {
+            cpu.registers.SR.setFlag(.T);
+            return;
+        }
+
+        // DIV Rd, IMM16        => Rd = Rd / IMM16
+        // DIV Rd, Rs           => Rd = Rd / Rs
+        // DIV Rd, Rs, IMM16    => Rd = Rs / IMM16
+        // DIV Rd, Rs, 0        => Defined behavior, but unexpected result! (Maybe better to reject parser side!?)
+
+        // DIVX Rd, Rs          => Rd = Rd / Rs     => Rd:Quotient Rs=Remainder
+        const first_operand: u16 = if (instruction.bytecode.imm16 != 0) cpu.registers.readRegister(instruction.bytecode.rs) else cpu.registers.readRegister(instruction.bytecode.rd);
+        const second_operand: u16 = if (instruction.bytecode.imm16 != 0) instruction.bytecode.imm16 else cpu.registers.readRegister(instruction.bytecode.rs);
+
+        // Check for division by zero
+        if (second_operand == 0) {
+            cpu.registers.SR.flags.T = true; // Set trap flag
+            return;
+        }
 
         if (instruction.bytecode.mode == @intFromEnum(Mode.REGISTER_IMM16)) {
-            // DIV Rd, Rs, imm16 → Rd = Rd / (Rs + imm16)
-            // When Rs=R0: Rd = Rd / imm16
-            // When imm16=0: Rd = Rd / Rs
-            const rd: u16 = cpu.registers.asArray()[rd_index];
-            const rs: u16 = cpu.registers.asArray()[rs_index];
-            const divisor: u16 = rs +% imm16; // Rs + imm16
-
-            // Check for division by zero
-            if (divisor == 0) {
-                cpu.registers.SR.updateDivideFlags(0, true);
-                cpu.registers.SR.flags.T = true; // Set trap flag
-                return error.DivisionByZero;
-            }
-
-            const quotient: u16 = rd / divisor;
+            const quotient: u32 = first_operand / second_operand;
+            const remainder: u16 = first_operand % second_operand;
+            const result: u16 = @truncate(quotient);
 
             // Update flags (N, Z, V)
-            cpu.registers.SR.updateDivideFlags(quotient, false);
+            cpu.registers.SR.updateFlag(.N, (result & 0x8000) != 0);
+            cpu.registers.SR.updateFlag(.Z, result == 0);
+            cpu.registers.SR.clearFlag(.C);
+            cpu.registers.SR.clearFlag(.V);
 
             // Write result to Rd (unless Rd is R0, which is always zero)
-            if (rd_index != 0) {
-                cpu.registers.asArray()[rd_index] = quotient;
+            if (instruction.bytecode.rd != 0) {
+                cpu.registers.writeRegister(instruction.bytecode.rd, result);
+                if (cpu.registers.SR.getFlag(.X)) {
+                    cpu.registers.writeRegister(instruction.bytecode.rs, remainder);
+                    cpu.registers.SR.clearFlag(.X);
+                }
             }
         } else {
             // Illegal instruction - set T flag and return error
@@ -504,32 +610,32 @@ test "ADD - Basic operations" {
 
     // ADD R1 => R1 = R1 + 1
     cpu.reset(false);
-    cpu.registers.writeRegister(1, 1);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 1);
     const add_sugar = Instruction.pack(0, .ADD, .REGISTER_IMM16, 0, .R1, .R1, 0, 0x0001);
     try Instruction.ADD(&cpu, add_sugar);
-    try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == 2);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 2);
 
     // ADD R1, R2 => R1 = R1 + R2
-    cpu.registers.writeRegister(1, 256);
-    cpu.registers.writeRegister(2, 256);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 256);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 256);
     const add_register = Instruction.pack(0, .ADD, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
     try Instruction.ADD(&cpu, add_register);
-    try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == 512);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 512);
 
     // ADD R1, 12 => R1 = R1 + 12
     cpu.reset(false);
-    cpu.registers.writeRegister(1, 256);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 256);
     const add_immediate = Instruction.pack(0, .ADD, .REGISTER_IMM16, 0, .R1, .R1, 0, 12);
     try Instruction.ADD(&cpu, add_immediate);
-    try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == (256 + 12));
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == (256 + 12));
 
     // ADD R1, R2, 12 => R1 = R1 + 12
     cpu.reset(false);
-    cpu.registers.writeRegister(1, 256);
-    cpu.registers.writeRegister(1, 128);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 256);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 128);
     const add_registerImmediate = Instruction.pack(0, .ADD, .REGISTER_IMM16, 0, .R1, .R1, 0, 12);
     try Instruction.ADD(&cpu, add_registerImmediate);
-    try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == (128 + 12));
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == (128 + 12));
 }
 
 test "ADD - Flag Z (Zero)" {
@@ -539,13 +645,13 @@ test "ADD - Flag Z (Zero)" {
 
     cpu.reset(false);
 
-    cpu.registers.writeRegister(1, 0);
-    cpu.registers.writeRegister(2, 0);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0);
 
     const add_zero = Instruction.pack(0, .ADD, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0000);
     try Instruction.ADD(&cpu, add_zero);
 
-    try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x0000);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x0000);
     try expect(cpu.registers.SR.flags.Z == true);
     try expect(cpu.registers.SR.flags.N == false);
     try expect(cpu.registers.SR.flags.C == false);
@@ -557,13 +663,13 @@ test "ADD - Flag N (Negative)" {
     var cpu = try CPU.init(allocator);
     defer cpu.deinit(allocator);
 
-    cpu.registers.writeRegister(1, 0x8000);
-    cpu.registers.writeRegister(2, 0x0);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x8000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0);
 
     const add_zero = Instruction.pack(0, .ADD, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0000);
     try Instruction.ADD(&cpu, add_zero);
 
-    try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x8000);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x8000);
     try expect(cpu.registers.SR.flags.Z == false);
     try expect(cpu.registers.SR.flags.N == true);
     try expect(cpu.registers.SR.flags.C == false);
@@ -576,13 +682,13 @@ test "ADD - Flag C (Carry)" {
     defer cpu.deinit(allocator);
 
     cpu.reset(false);
-    cpu.registers.writeRegister(1, 0x8000);
-    cpu.registers.writeRegister(2, 0x8001);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x8000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x8001);
 
     const add_zero = Instruction.pack(0, .ADD, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0000);
     try Instruction.ADD(&cpu, add_zero);
 
-    try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x0001);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x0001);
     try expect(cpu.registers.SR.flags.Z == false);
     try expect(cpu.registers.SR.flags.N == false);
     try expect(cpu.registers.SR.flags.C == true);
@@ -597,13 +703,13 @@ test "ADD - Flag V (Overflow)" {
     cpu.reset(false);
 
     cpu.reset(false);
-    cpu.registers.writeRegister(1, 0x4000);
-    cpu.registers.writeRegister(2, 0x4000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x4000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x4000);
 
     const add_zero = Instruction.pack(0, .ADD, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0000);
     try Instruction.ADD(&cpu, add_zero);
 
-    try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x8000);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x8000);
     try expect(cpu.registers.SR.flags.Z == false);
     try expect(cpu.registers.SR.flags.N == true);
     try expect(cpu.registers.SR.flags.C == false);
@@ -618,11 +724,11 @@ test "ADD - R0 destination" {
     cpu.reset(false);
 
     // ADD R0, Rs, imm → R0 stays 0, but flags are still updated
-    cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0xFFFF;
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xFFFF);
     const add_r0 = Instruction.pack(0, .ADD, .REGISTER_IMM16, 0, .R0, .R1, 0, 0x0001);
     try Instruction.ADD(&cpu, add_r0);
 
-    try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R0)] == 0x0000); // R0 always 0
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R0)) == 0x0000); // R0 always 0
     try expect(cpu.registers.SR.flags.C == true); // But flags updated
     try expect(cpu.registers.SR.flags.Z == true); // Result would be 0
 }
@@ -634,10 +740,10 @@ test "ADD - Edge cases" {
 
     // Test: Maximum values
     cpu.reset(false);
-    cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0xFFFF;
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xFFFF);
     const add_max = Instruction.pack(0, .ADD, .REGISTER_IMM16, 0, .R2, .R1, 0, 0xFFFF);
     try Instruction.ADD(&cpu, add_max);
-    try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0xFFFE); // 0x1FFFE truncated
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0xFFFE); // 0x1FFFE truncated
     try expect(cpu.registers.SR.flags.N == true);
     try expect(cpu.registers.SR.flags.Z == false);
     try expect(cpu.registers.SR.flags.C == true);
@@ -645,14 +751,82 @@ test "ADD - Edge cases" {
 
     // Test: Rs = Rd (self-add)
     cpu.reset(false);
-    cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0x0005;
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0x0005);
     const add_self = Instruction.pack(0, .ADD, .REGISTER_IMM16, 0, .R3, .R3, 0, 0x0000);
     try Instruction.ADD(&cpu, add_self);
-    try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] == 0x000A); // Rd = Rd + Rd
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R3)) == 0x000A); // Rd = Rd + Rd
     try expect(cpu.registers.SR.flags.N == false);
     try expect(cpu.registers.SR.flags.Z == false);
     try expect(cpu.registers.SR.flags.C == false);
     try expect(cpu.registers.SR.flags.V == false);
+}
+
+test "ADDX - Basic (ADC behaviour)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // Set carry in
+    cpu.registers.SR.setFlag(.C);
+
+    // Set X flag
+    cpu.registers.SR.setFlag(.X);
+
+    // 1 + 1 + carry(1) = 3
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0001);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0001);
+    const addx_basic = Instruction.pack(0, .ADD, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.ADD(&cpu, addx_basic);
+
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0003);
+}
+
+test "ADDX - Flags N C Z V" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // Case A: carry out
+    cpu.reset(false);
+    // Set X flag
+    cpu.registers.SR.setFlag(.X);
+
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xFFFF);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0001);
+    const addx_carry = Instruction.pack(0, .ADD, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.ADD(&cpu, addx_carry);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0000);
+    try expect(cpu.registers.SR.flags.Z == true);
+    try expect(cpu.registers.SR.flags.C == true);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.V == false);
+
+    // Case B: signed overflow
+    cpu.reset(false);
+    // Set X flag
+    cpu.registers.SR.setFlag(.X);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x4000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x4000);
+    const addx_of = Instruction.pack(0, .ADD, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.ADD(&cpu, addx_of);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x8000);
+    try expect(cpu.registers.SR.flags.N == true);
+    try expect(cpu.registers.SR.flags.V == true);
+
+    // Case C: overflow with carry-in affecting V
+    cpu.reset(false);
+    // Set X flag
+    cpu.registers.SR.setFlag(.X);
+    cpu.registers.SR.setFlag(.C);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x7FFF);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0001);
+    const addx_carryin_of = Instruction.pack(0, .ADD, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.ADD(&cpu, addx_carryin_of);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x8001);
+    try expect(cpu.registers.SR.flags.N == true);
+    try expect(cpu.registers.SR.flags.V == true);
 }
 
 test "ADD - Illegal_instruction" {
@@ -669,563 +843,811 @@ test "ADD - Illegal_instruction" {
     try expect(cpu.registers.SR.raw == check);
 }
 
-// test "SUB - Basic operations" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // Test 1: SUB Rd, Rs → Rd = Rd - Rs
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0050;
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] = 0x0020;
-//     const sub_reg = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
-//     try Instruction.SUB(&cpu, sub_reg);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == 0x0030);
-//     try expect(cpu.registers.SR.flags.Z == false);
-//     try expect(cpu.registers.SR.flags.N == false);
-//     try expect(cpu.registers.SR.flags.C == true); // No borrow (ARM-style)
-//     try expect(cpu.registers.SR.flags.V == false);
-
-//     // Test 2: SUB Rd, imm (Rs=R0) → Rd = Rd - imm
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0x1234;
-//     const sub_imm = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R3, .R3, 0, 0x0234);
-//     try Instruction.SUB(&cpu, sub_imm);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] == 0x1000);
-
-//     // Test 3: SUB Rd (decrement) → Rd = Rd - 1
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] = 0x0010;
-//     const sub_dec = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R4, .R4, 0, 0x0001);
-//     try Instruction.SUB(&cpu, sub_dec);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] == 0x000F);
-
-//     // Test 4: SUB Rd, Rs, imm → Rd = Rd - Rs - imm
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R5)] = 0x0100;
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R6)] = 0x0050;
-//     const sub_both = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R5, .R6, 0, 0x0010);
-//     try Instruction.SUB(&cpu, sub_both);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R5)] == 0x0040); // 0x100 - 0x50 - 0x10
-// }
-
-// test "SUB - Flag Z (Zero)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // Test: 0x10 - 0x10 = 0 → Z=1
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0010;
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] = 0x0010;
-//     const sub_zero = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
-//     try Instruction.SUB(&cpu, sub_zero);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == 0x0000);
-//     try expect(cpu.registers.SR.flags.Z == true);
-//     try expect(cpu.registers.SR.flags.N == false);
-//     try expect(cpu.registers.SR.flags.C == true); // No borrow
-// }
-
-// test "SUB - Flag N (Negative)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // Test: 0x0001 - 0x0002 = 0xFFFF → N=1 (bit 15 set)
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0001;
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] = 0x0002;
-//     const sub_neg = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
-//     try Instruction.SUB(&cpu, sub_neg);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == 0xFFFF);
-//     try expect(cpu.registers.SR.flags.N == true);
-//     try expect(cpu.registers.SR.flags.Z == false);
-// }
-
-// test "SUB - Flag C (Borrow) - ARM style" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // Test: 0x0001 - 0x0002 = underflow → C=0 (borrow occurred, ARM-style)
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0001;
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] = 0x0002;
-//     const sub_borrow = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
-//     try Instruction.SUB(&cpu, sub_borrow);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == 0xFFFF);
-//     try expect(cpu.registers.SR.flags.C == false); // Borrow occurred (ARM-style: C=0)
-
-//     // Test: 0x0000 - 0x0001 = underflow → C=0
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0x0000;
-//     const sub_borrow2 = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R3, .R3, 0, 0x0001);
-//     try Instruction.SUB(&cpu, sub_borrow2);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] == 0xFFFF);
-//     try expect(cpu.registers.SR.flags.C == false);
-
-//     // Test: 0x8000 - 0x0001 = 0x7FFF → C=1 (no borrow)
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R5)] = 0x8000;
-//     const sub_no_borrow = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R5, .R5, 0, 0x0001);
-//     try Instruction.SUB(&cpu, sub_no_borrow);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R5)] == 0x7FFF);
-//     try expect(cpu.registers.SR.flags.C == true); // No borrow (ARM-style: C=1)
-
-//     // Test: Equal values → C=1 (no borrow)
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R6)] = 0x1234;
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R7)] = 0x1234;
-//     const sub_equal = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R6, .R7, 0, 0x0000);
-//     try Instruction.SUB(&cpu, sub_equal);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R6)] == 0x0000);
-//     try expect(cpu.registers.SR.flags.C == true); // No borrow
-// }
-
-// test "SUB - Flag V (Overflow)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // Test: Positive - Negative = overflow → V=1
-//     // 0x7FFF (32767) - 0xFFFF (-1) = 0x8000 (-32768) → signed overflow!
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x7FFF;
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] = 0xFFFF;
-//     const sub_overflow1 = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
-//     try Instruction.SUB(&cpu, sub_overflow1);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == 0x8000);
-//     try expect(cpu.registers.SR.flags.V == true);
-//     try expect(cpu.registers.SR.flags.N == true);
-
-//     // Test: Negative - Positive = overflow → V=1
-//     // 0x8000 (-32768) - 0x0001 (1) = 0x7FFF (32767) → signed overflow!
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0x8000;
-//     const sub_overflow2 = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R3, .R3, 0, 0x0001);
-//     try Instruction.SUB(&cpu, sub_overflow2);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] == 0x7FFF);
-//     try expect(cpu.registers.SR.flags.V == true);
-//     try expect(cpu.registers.SR.flags.N == false);
-
-//     // Test: Positive - Positive = No overflow → V=0
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R5)] = 0x7FFF;
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R6)] = 0x1000;
-//     const sub_no_overflow = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R5, .R6, 0, 0x0000);
-//     try Instruction.SUB(&cpu, sub_no_overflow);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R5)] == 0x6FFF);
-//     try expect(cpu.registers.SR.flags.V == false);
-
-//     // Test: Negative - Negative = No overflow → V=0
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R7)] = 0x8000;
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R8)] = 0xFFFF;
-//     const sub_no_overflow2 = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R7, .R8, 0, 0x0000);
-//     try Instruction.SUB(&cpu, sub_no_overflow2);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R7)] == 0x8001);
-//     try expect(cpu.registers.SR.flags.V == false);
-// }
-
-// test "SUB - R0 destination (void write)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // SUB R0, Rs, imm → R0 stays 0, but flags are still updated
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0010;
-//     const sub_r0 = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R0, .R0, 0, 0x0005);
-//     try Instruction.SUB(&cpu, sub_r0);
-
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R0)] == 0x0000); // R0 always 0
-//     try expect(cpu.registers.SR.flags.C == false); // Borrow occurred (0 - 0x15)
-//     try expect(cpu.registers.SR.flags.N == true); // Result would be negative
-// }
-
-// test "SUB - Edge cases" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     // Test: Subtract from zero
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0000;
-//     const sub_from_zero = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R1, .R1, 0, 0x0001);
-//     try Instruction.SUB(&cpu, sub_from_zero);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == 0xFFFF);
-//     try expect(cpu.registers.SR.flags.C == false); // Borrow
-
-//     // Test: Maximum underflow
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] = 0x0000;
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0xFFFF;
-//     const sub_max = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R2, .R3, 0, 0x0000);
-//     try Instruction.SUB(&cpu, sub_max);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x0001);
-//     try expect(cpu.registers.SR.flags.C == false); // Borrow (huge underflow)
-
-//     // Test: Self-subtract → result = 0
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] = 0xABCD;
-//     const sub_self = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R4, .R4, 0, 0x0000);
-//     try Instruction.SUB(&cpu, sub_self);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] == 0x0000);
-//     try expect(cpu.registers.SR.flags.Z == true);
-//     try expect(cpu.registers.SR.flags.C == true); // No borrow (equal values)
-// }
-
-// test "SUB - Illegal mode" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // SUB doesn't support OFFSET_INDEXED mode
-//     const sub_illegal = Instruction.pack(0, .SUB, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
-//     try Instruction.SUB(&cpu, sub_illegal);
-//     try expect(cpu.registers.SR.flags.T == true);
-// }
-
-// test "MUL - Basic operations" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // Test 1: MUL Rd, Rs, imm16 → Rd = Rs * imm16
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] = 0x0010;
-//     const mul_imm = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0003);
-//     try Instruction.MUL(&cpu, mul_imm);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == 0x0030);
-//     try expect(cpu.registers.SR.flags.Z == false);
-//     try expect(cpu.registers.SR.flags.N == false);
-//     try expect(cpu.registers.SR.flags.V == false);
-
-//     // Test 2: MUL Rd, imm (Rs=R0) → Rd = 0 * imm = 0
-//     cpu.reset(false);
-//     const mul_zero = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R3, .R3, 0, 0x1234);
-//     try Instruction.MUL(&cpu, mul_zero);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] == 0x0000);
-//     try expect(cpu.registers.SR.flags.Z == true);
-
-//     // Test 3: Simple multiplication
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] = 0x000A; // 10
-//     const mul_simple = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R5, .R4, 0, 0x0005); // 10 * 5
-//     try Instruction.MUL(&cpu, mul_simple);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R5)] == 0x0032); // 50
-// }
-
-// test "MUL - Flag Z (Zero)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // Test: 0 * anything = 0 → Z=1
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0000;
-//     const mul_zero1 = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R2, .R1, 0, 0xFFFF);
-//     try Instruction.MUL(&cpu, mul_zero1);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x0000);
-//     try expect(cpu.registers.SR.flags.Z == true);
-//     try expect(cpu.registers.SR.flags.N == false);
-
-//     // Test: anything * 0 = 0 → Z=1
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0xFFFF;
-//     const mul_zero2 = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0000);
-//     try Instruction.MUL(&cpu, mul_zero2);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] == 0x0000);
-//     try expect(cpu.registers.SR.flags.Z == true);
-// }
-
-// test "MUL - Flag N (Negative)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // Test: Result with bit 15 set → N=1
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x4000; // 16384
-//     const mul_neg = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0002);
-//     try Instruction.MUL(&cpu, mul_neg);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x8000); // 32768, bit 15 set
-//     try expect(cpu.registers.SR.flags.N == true);
-//     try expect(cpu.registers.SR.flags.Z == false);
-// }
-
-// test "MUL - Flag V (Overflow)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // Test: Result > 0xFFFF → V=1 (overflow)
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0100; // 256
-//     const mul_overflow1 = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0100); // 256 * 256 = 65536
-//     try Instruction.MUL(&cpu, mul_overflow1);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x0000); // Truncated to 16 bits
-//     try expect(cpu.registers.SR.flags.V == true);
-//     try expect(cpu.registers.SR.flags.Z == true); // Result is 0 after truncation
-
-//     // Test: Large multiplication with overflow
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0xFFFF; // 65535
-//     const mul_overflow2 = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0002); // 65535 * 2 = 131070
-//     try Instruction.MUL(&cpu, mul_overflow2);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] == 0xFFFE); // 131070 & 0xFFFF
-//     try expect(cpu.registers.SR.flags.V == true);
-
-//     // Test: Just at the edge (no overflow)
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R5)] = 0x00FF; // 255
-//     const mul_no_overflow = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R6, .R5, 0, 0x00FF); // 255 * 255 = 65025
-//     try Instruction.MUL(&cpu, mul_no_overflow);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R6)] == 0xFE01); // 65025
-//     try expect(cpu.registers.SR.flags.V == false); // Fits in 16 bits
-// }
-
-// test "MUL - R0 destination (void write)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // MUL R0, Rs, imm → R0 stays 0, but flags are still updated
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0100;
-//     const mul_r0 = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R0, .R1, 0, 0x0100);
-//     try Instruction.MUL(&cpu, mul_r0);
-
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R0)] == 0x0000); // R0 always 0
-//     try expect(cpu.registers.SR.flags.V == true); // But flags updated (overflow)
-// }
-
-// test "MUL - Edge cases" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     // Test: Multiply by 1 (identity)
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0xABCD;
-//     const mul_one = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0001);
-//     try Instruction.MUL(&cpu, mul_one);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0xABCD);
-//     try expect(cpu.registers.SR.flags.V == false);
-
-//     // Test: Maximum value * 1 (no overflow)
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0xFFFF;
-//     const mul_max = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0001);
-//     try Instruction.MUL(&cpu, mul_max);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] == 0xFFFF);
-//     try expect(cpu.registers.SR.flags.V == false);
-
-//     // Test: Small values
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R5)] = 0x0002;
-//     const mul_small = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R6, .R5, 0, 0x0003);
-//     try Instruction.MUL(&cpu, mul_small);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R6)] == 0x0006);
-// }
-
-// test "MUL - Illegal mode" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // MUL doesn't support OFFSET_INDEXED mode
-//     const mul_illegal = Instruction.pack(0, .MUL, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
-//     try Instruction.MUL(&cpu, mul_illegal);
-//     try expect(cpu.registers.SR.flags.T == true); // T flag set on illegal instruction
-// }
-
-// test "DIV - Basic operations" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // Test 1: DIV Rd, Rs → Rd = Rd / Rs
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0064; // 100
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] = 0x000A; // 10
-//     const div_reg = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
-//     try Instruction.DIV(&cpu, div_reg);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == 0x000A); // 100 / 10 = 10
-//     try expect(cpu.registers.SR.flags.Z == false);
-//     try expect(cpu.registers.SR.flags.N == false);
-//     try expect(cpu.registers.SR.flags.V == false);
-
-//     // Test 2: DIV Rd, imm (Rs=R0) → Rd = Rd / imm
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0x0078; // 120
-//     const div_imm = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R3, .R3, 0, 0x000C); // 120 / 12
-//     try Instruction.DIV(&cpu, div_imm);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] == 0x000A); // 10
-
-//     // Test 3: DIV with remainder discarded
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] = 0x000A; // 10
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R5)] = 0x0003; // 3
-//     const div_remainder = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R4, .R5, 0, 0x0000);
-//     try Instruction.DIV(&cpu, div_remainder);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] == 0x0003); // 10 / 3 = 3 (remainder 1 discarded)
-
-//     // Test 4: DIV Rd, Rs, imm → Rd = Rd / (Rs + imm)
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R6)] = 0x0064; // 100
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R7)] = 0x0005; // 5
-//     const div_both = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R6, .R7, 0, 0x0005); // 100 / (5 + 5) = 100 / 10
-//     try Instruction.DIV(&cpu, div_both);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R6)] == 0x000A); // 10
-// }
-
-// test "DIV - Flag Z (Zero)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // Test: 0 / anything = 0 → Z=1
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0000;
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] = 0x000A;
-//     const div_zero = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
-//     try Instruction.DIV(&cpu, div_zero);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == 0x0000);
-//     try expect(cpu.registers.SR.flags.Z == true);
-//     try expect(cpu.registers.SR.flags.N == false);
-
-//     // Test: Dividend < Divisor → quotient = 0 → Z=1
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0x0005; // 5
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] = 0x000A; // 10
-//     const div_small = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R3, .R4, 0, 0x0000); // 5 / 10 = 0
-//     try Instruction.DIV(&cpu, div_small);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] == 0x0000);
-//     try expect(cpu.registers.SR.flags.Z == true);
-// }
-
-// test "DIV - Flag N (Negative)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // Test: Result with bit 15 set → N=1
-//     // 0xFFFF (65535) / 0x0001 (1) = 0xFFFF (bit 15 set)
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0xFFFF;
-//     const div_neg = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R1, .R1, 0, 0x0001);
-//     try Instruction.DIV(&cpu, div_neg);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == 0xFFFF);
-//     try expect(cpu.registers.SR.flags.N == true);
-//     try expect(cpu.registers.SR.flags.Z == false);
-
-//     // Test: 0x8000 / 0x0001 = 0x8000 → N=1
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] = 0x8000;
-//     const div_neg2 = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R2, .R2, 0, 0x0001);
-//     try Instruction.DIV(&cpu, div_neg2);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x8000);
-//     try expect(cpu.registers.SR.flags.N == true);
-// }
-
-// test "DIV - Division by zero" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // Test: Divide by zero → error + V=1 + T=1
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0064;
-//     const div_by_zero = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R1, .R1, 0, 0x0000);
-//     try std.testing.expectError(error.DivisionByZero, Instruction.DIV(&cpu, div_by_zero));
-//     try expect(cpu.registers.SR.flags.V == true); // Overflow/error flag
-//     try expect(cpu.registers.SR.flags.T == true); // Trap flag
-
-// }
-
-// test "DIV - R0 destination (void write)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // DIV R0, Rs, imm → R0 stays 0, but flags are still updated
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x000A;
-//     const div_r0 = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R0, .R1, 0, 0x0000);
-//     try Instruction.DIV(&cpu, div_r0);
-
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R0)] == 0x0000); // R0 always 0
-//     try expect(cpu.registers.SR.flags.Z == true); // But flags updated (0 / 10 = 0)
-// }
-
-// test "DIV - Edge cases" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     // Test: Divide by 1 (identity)
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0xABCD;
-//     const div_one = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R1, .R0, 0, 0x0001);
-//     try Instruction.DIV(&cpu, div_one);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == 0xABCD);
-
-//     // Test: Self-divide → result = 1
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] = 0x0042;
-//     const div_self = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R2, .R2, 0, 0x0000);
-//     try Instruction.DIV(&cpu, div_self);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x0001); // 0x42 / 0x42 = 1
-
-//     // Test: Maximum value / 2
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0xFFFF;
-//     const div_max = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R3, .R0, 0, 0x0002);
-//     try Instruction.DIV(&cpu, div_max);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] == 0x7FFF); // 65535 / 2 = 32767
-
-//     // Test: Large dividend, large divisor
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] = 0xFFFF; // 65535
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R5)] = 0xFFFF; // 65535
-//     const div_equal = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R4, .R5, 0, 0x0000);
-//     try Instruction.DIV(&cpu, div_equal);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] == 0x0001); // 65535 / 65535 = 1
-// }
-
-// test "DIV - Illegal mode" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
-
-//     cpu.reset(false);
-
-//     // DIV doesn't support OFFSET_INDEXED mode
-//     const div_illegal = Instruction.pack(0, .DIV, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
-//     try Instruction.DIV(&cpu, div_illegal);
-//     try expect(cpu.registers.SR.flags.T == true); // T flag set on illegal instruction
-// }
+test "SUB - Basic operations" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // SUB R4 => SUB R4, R4, 1
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R4), 0x0010);
+    const sub_dec = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R4, .R4, 0, 0x0001);
+    try Instruction.SUB(&cpu, sub_dec);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R4)) == 0x000F);
+
+    // SUB R1, R2
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0050);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0020);
+    const sub_reg = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.SUB(&cpu, sub_reg);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0030);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.C == false);
+    try expect(cpu.registers.SR.flags.V == false);
+
+    // SUB R3, 0x1234
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0x1234);
+    const sub_imm = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R3, .R3, 0, 0x0234);
+    try Instruction.SUB(&cpu, sub_imm);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R3)) == 0x1000);
+
+    // SUB R5, R6, 0x10
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R5), 0x0100);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R6), 0x0050);
+    const sub_both = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R5, .R6, 0, 0x0010);
+    try Instruction.SUB(&cpu, sub_both);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R5)) == 0x0040); // 0x100 - 0x50 - 0x10
+}
+
+test "SUB - Flag Z (Zero)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // Test: 0x10 - 0x10 = 0 → Z=1
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0010);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0010);
+    const sub_zero = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.SUB(&cpu, sub_zero);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0000);
+    try expect(cpu.registers.SR.flags.Z == true);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.C == false);
+    try expect(cpu.registers.SR.flags.V == false);
+}
+
+test "SUB - Flag N (Negative)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // Test: 0x0001 - 0x0002 = 0xFFFF → N=1 (bit 15 set)
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0001);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0002);
+    const sub_neg = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.SUB(&cpu, sub_neg);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0xFFFF);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == true);
+    try expect(cpu.registers.SR.flags.C == true);
+    try expect(cpu.registers.SR.flags.V == false);
+}
+
+test "SUB - Flag C (Borrow) - ARM style" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // Test: 0x0001 - 0x0002
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0001);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0002);
+    const sub_borrow = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.SUB(&cpu, sub_borrow);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0xFFFF);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == true);
+    try expect(cpu.registers.SR.flags.C == true);
+    try expect(cpu.registers.SR.flags.V == false);
+
+    // Test: 0x0000 - 0x0001
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0x0000);
+    const sub_borrow2 = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R3, .R3, 0, 0x0001);
+    try Instruction.SUB(&cpu, sub_borrow2);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R3)) == 0xFFFF);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == true);
+    try expect(cpu.registers.SR.flags.C == true);
+    try expect(cpu.registers.SR.flags.V == false);
+
+    // Test: 0x8000 - 0x0001 = 0x7FFF
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R5), 0x8000);
+    const sub_no_borrow = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R5, .R5, 0, 0x0001);
+    try Instruction.SUB(&cpu, sub_no_borrow);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R5)) == 0x7FFF);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.C == false);
+    try expect(cpu.registers.SR.flags.V == true);
+
+    // Test: Equal values
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R6), 0x1234);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R7), 0x1234);
+    const sub_equal = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R6, .R7, 0, 0x0000);
+    try Instruction.SUB(&cpu, sub_equal);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R6)) == 0x0000);
+    try expect(cpu.registers.SR.flags.Z == true);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.C == false);
+    try expect(cpu.registers.SR.flags.V == false);
+}
+
+test "SUB - Flag V (Overflow)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // Test: Positive - Negative = overflow → V=1
+    // 0x7FFF (32767) - 0xFFFF (-1) = 0x8000 (-32768) → signed overflow!
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x7FFF);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0xFFFF);
+    const sub_overflow1 = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.SUB(&cpu, sub_overflow1);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x8000);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == true);
+    try expect(cpu.registers.SR.flags.C == true);
+    try expect(cpu.registers.SR.flags.V == true);
+
+    // Test: Negative - Positive = overflow → V=1
+    // 0x8000 (-32768) - 0x0001 (1) = 0x7FFF (32767) → signed overflow!
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0x8000);
+    const sub_overflow2 = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R3, .R3, 0, 0x0001);
+    try Instruction.SUB(&cpu, sub_overflow2);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R3)) == 0x7FFF);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.C == false);
+    try expect(cpu.registers.SR.flags.V == true);
+
+    // Test: Positive - Positive = No overflow → V=0
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R5), 0x7FFF);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R6), 0x1000);
+    const sub_no_overflow = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R5, .R6, 0, 0x0000);
+    try Instruction.SUB(&cpu, sub_no_overflow);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R5)) == 0x6FFF);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.C == false);
+    try expect(cpu.registers.SR.flags.V == false);
+
+    // Test: Negative - Negative = No overflow → V=0
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R7), 0x8000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R8), 0xFFFF);
+    const sub_no_overflow2 = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R7, .R8, 0, 0x0000);
+    try Instruction.SUB(&cpu, sub_no_overflow2);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R7)) == 0x8001);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == true);
+    try expect(cpu.registers.SR.flags.C == true);
+    try expect(cpu.registers.SR.flags.V == false);
+}
+
+test "SUB - R0 destination (void write)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // SUB R0, Rs, imm → R0 stays 0, but flags are still updated
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0010);
+    const sub_r0 = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R0, .R1, 0, 0x0005);
+    try Instruction.SUB(&cpu, sub_r0);
+
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R0)) == 0x0000); // R0 always 0
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.C == false);
+    try expect(cpu.registers.SR.flags.V == false);
+}
+
+test "SUB - Edge cases" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // Test: Subtract from zero
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0000);
+    const sub_from_zero = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R1, .R1, 0, 0x0001);
+    try Instruction.SUB(&cpu, sub_from_zero);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0xFFFF);
+    try expect(cpu.registers.SR.flags.C == true);
+
+    // Test: Maximum underflow
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0xFFFF);
+    const sub_max = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R2, .R3, 0, 0x0000);
+    try Instruction.SUB(&cpu, sub_max);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x0001);
+    try expect(cpu.registers.SR.flags.C == true);
+
+    // Test: Self-subtract → result = 0
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R4), 0xABCD);
+    const sub_self = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R4, .R4, 0, 0x0000);
+    try Instruction.SUB(&cpu, sub_self);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R4)) == 0x0000);
+    try expect(cpu.registers.SR.flags.Z == true);
+    try expect(cpu.registers.SR.flags.C == false); // No borrow (equal values)
+}
+
+test "SUB - Illegal mode" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    const add_illegal = Instruction.pack(0, .SUB, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
+    try Instruction.ADD(&cpu, add_illegal);
+    const check = @as(u16, @intFromEnum(Trap.Illegal_instruction)) |
+        @as(u16, @intFromBool(cpu.registers.SR.flags.T)) << 15;
+    try expect(cpu.registers.SR.raw == check);
+}
+
+test "SUBX - Basic (SBC behaviour)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // Enable X and set carry-in
+    cpu.registers.SR.setFlag(.X);
+    cpu.registers.SR.setFlag(.C);
+
+    // Assume SBC subtracts carry-in as extra 1: 2 - 1 - 1 = 0
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0002);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0001);
+    const subx_basic = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.SUB(&cpu, subx_basic);
+
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0000);
+}
+
+test "SUBX - Flags N C Z V" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // Case A: borrow occurs -> 0 - 1 - 1 = 0xFFFE
+    cpu.reset(false);
+    cpu.registers.SR.setFlag(.X);
+    cpu.registers.SR.setFlag(.C);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0001);
+    const subx_borrow = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.SUB(&cpu, subx_borrow);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0xFFFE);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == true);
+    try expect(cpu.registers.SR.flags.C == true);
+    try expect(cpu.registers.SR.flags.V == false);
+
+    // Case B: result zero -> 2 - 1 - 1 = 0
+    cpu.reset(false);
+    cpu.registers.SR.setFlag(.X);
+    cpu.registers.SR.setFlag(.C);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0002);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0001);
+    const subx_zero = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.SUB(&cpu, subx_zero);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0000);
+    try expect(cpu.registers.SR.flags.Z == true);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.C == false);
+    try expect(cpu.registers.SR.flags.V == false);
+
+    // Case C: signed overflow example -> 0x8000 - 1 - 1 = 0x7FFE (overflow)
+    cpu.reset(false);
+    cpu.registers.SR.setFlag(.X);
+    cpu.registers.SR.setFlag(.C);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x8000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0001);
+    const subx_of = Instruction.pack(0, .SUB, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.SUB(&cpu, subx_of);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x7FFE);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.C == false);
+    try expect(cpu.registers.SR.flags.V == true);
+}
+
+test "MUL - Basic operations" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // Test 1: MUL Rd, Rs, imm16 → Rd = Rs * imm16
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0010);
+    const mul_imm = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0003);
+    try Instruction.MUL(&cpu, mul_imm);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0030);
+
+    // Test 2: MUL Rd, imm (Rs=R0) → Rd = 0 * imm = 0
+    cpu.reset(false);
+    const mul_zero = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R3, .R3, 0, 0x1234);
+    try Instruction.MUL(&cpu, mul_zero);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R3)) == 0x0000);
+
+    // Test 3: Simple multiplication
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R4), 0x000A); // 10
+    const mul_simple = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R5, .R4, 0, 0x0005); // 10 * 5
+    try Instruction.MUL(&cpu, mul_simple);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R5)) == 0x0032); // 50
+}
+
+test "MUL - Flag Z (Zero)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // Test: 0 * anything = 0 → Z=1
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0000);
+    const mul_zero1 = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R2, .R1, 0, 0xFFFF);
+    try Instruction.MUL(&cpu, mul_zero1);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x0000);
+    try expect(cpu.registers.SR.flags.Z == true);
+    try expect(cpu.registers.SR.flags.N == false);
+
+    // Test: anything * 0 = 0 → Z=1
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0xFFFF);
+    const mul_zero2 = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0000);
+    try Instruction.MUL(&cpu, mul_zero2);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R4)) == 0x0000);
+    try expect(cpu.registers.SR.flags.Z == true);
+}
+
+test "MUL - Flag N (Negative)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // Test: Result with bit 15 set → N=1
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x4000); // 16384
+    const mul_neg = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0002);
+    try Instruction.MUL(&cpu, mul_neg);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x8000); // 32768, bit 15 set
+    try expect(cpu.registers.SR.flags.N == true);
+    try expect(cpu.registers.SR.flags.Z == false);
+}
+
+test "MUL - Flag V (Overflow)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // Test: Result > 0xFFFF → V=1 (overflow)
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0100); // 256
+    const mul_overflow1 = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0100); // 256 * 256 = 65536
+    try Instruction.MUL(&cpu, mul_overflow1);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x0000); // Truncated to 16 bits
+    try expect(cpu.registers.SR.flags.V == true);
+    try expect(cpu.registers.SR.flags.Z == true); // Result is 0 after truncation
+
+    // Test: Large multiplication with overflow
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0xFFFF); // 65535
+    const mul_overflow2 = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0002); // 65535 * 2 = 131070
+    try Instruction.MUL(&cpu, mul_overflow2);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R4)) == 0xFFFE); // 131070 & 0xFFFF
+    try expect(cpu.registers.SR.flags.V == true);
+
+    // Test: Just at the edge (no overflow)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R5), 0x00FF); // 255
+    const mul_no_overflow = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R6, .R5, 0, 0x00FF); // 255 * 255 = 65025
+    try Instruction.MUL(&cpu, mul_no_overflow);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R6)) == 0xFE01); // 65025
+    try expect(cpu.registers.SR.flags.V == false); // Fits in 16 bits
+}
+
+test "MUL - R0 destination (void write)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // MUL R0, Rs, imm → R0 stays 0, but flags are still updated
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0100);
+    const mul_r0 = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R0, .R1, 0, 0x0100);
+    try Instruction.MUL(&cpu, mul_r0);
+
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R0)) == 0x0000); // R0 always 0
+    try expect(cpu.registers.SR.flags.V == true); // But flags updated (overflow)
+}
+
+test "MUL - Edge cases" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // Test: Multiply by 1 (identity)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xABCD);
+    const mul_one = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0001);
+    try Instruction.MUL(&cpu, mul_one);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0xABCD);
+    try expect(cpu.registers.SR.flags.V == false);
+
+    // Test: Maximum value * 1 (no overflow)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0xFFFF);
+    const mul_max = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0001);
+    try Instruction.MUL(&cpu, mul_max);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R4)) == 0xFFFF);
+    try expect(cpu.registers.SR.flags.V == false);
+
+    // Test: Small values
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R5), 0x0002);
+    const mul_small = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R6, .R5, 0, 0x0003);
+    try Instruction.MUL(&cpu, mul_small);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R6)) == 0x0006);
+}
+
+test "MUL - Illegal mode" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // MUL doesn't support OFFSET_INDEXED mode
+    const mul_illegal = Instruction.pack(0, .MUL, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
+    try Instruction.MUL(&cpu, mul_illegal);
+    try expect(cpu.registers.SR.flags.T == true); // T flag set on illegal instruction
+}
+
+test "MULX - (32-bit result)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // Enable X flag so MUL stores full 32-bit result across Rd (MSB) and Rs (LSB)
+    cpu.registers.SR.setFlag(.X);
+
+    // Example: 0xFFFF * 0x0002 = 0x0001_FFFE
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xFFFF);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0002);
+    const mul_with_x = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.MUL(&cpu, mul_with_x);
+
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0001); // MSB
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0xFFFE); // LSB
+}
+
+test "MULX - Flags Z N C V" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // Case 1: Zero result -> Z=1, N=0, V=0, C=0
+    cpu.reset(false);
+    cpu.registers.SR.setFlag(.X);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x1234);
+    const mulx_zero = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.MUL(&cpu, mulx_zero);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0000);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x0000);
+    try expect(cpu.registers.SR.flags.Z == true);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.V == false);
+    try expect(cpu.registers.SR.flags.C == false);
+
+    // Case 2: Small product (no overflow) -> Z=0, N=0, V=0, C=0
+    cpu.reset(false);
+    cpu.registers.SR.setFlag(.X);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x1234);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0002);
+    const mulx_small = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.MUL(&cpu, mulx_small);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0000); // hi
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x2468); // lo
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.V == false);
+    try expect(cpu.registers.SR.flags.C == false);
+
+    // Case 3: Overflow but not MSB of 32-bit -> V=1, C=1, N=0
+    cpu.reset(false);
+    cpu.registers.SR.setFlag(.X);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xFFFF);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0002);
+    const mulx_of = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.MUL(&cpu, mulx_of);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0001);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0xFFFE);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.V == true);
+    try expect(cpu.registers.SR.flags.C == true);
+
+    // Case 4: Large product with MSB set -> N=1, V=1, C=1
+    cpu.reset(false);
+    cpu.registers.SR.setFlag(.X);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xFFFF);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0xFFFF);
+    const mulx_big = Instruction.pack(0, .MUL, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.MUL(&cpu, mulx_big);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0xFFFE);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x0001);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == true);
+    try expect(cpu.registers.SR.flags.V == true);
+    try expect(cpu.registers.SR.flags.C == true);
+}
+
+test "DIV - Basic operations" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // Test 1: DIV Rd, Rs → Rd = Rd / Rs
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0064); // 100
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x000A); // 10
+    const div_reg = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.DIV(&cpu, div_reg);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x000A); // 100 / 10 = 10
+
+    // Test 2: DIV Rd, imm (Rs=R0) → Rd = Rd / imm
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0x0078); // 120
+    const div_imm = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R3, .R3, 0, 0x000C); // 120 / 12
+    try Instruction.DIV(&cpu, div_imm);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R3)) == 0x000A); // 10
+
+    // Test 3: DIV with remainder discarded
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R4), 0x000A); // 10
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R5), 0x0003); // 3
+    const div_remainder = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R4, .R5, 0, 0x0000);
+    try Instruction.DIV(&cpu, div_remainder);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R4)) == 0x0003); // 10 / 3 = 3 (remainder 1 discarded)
+
+}
+
+test "DIV - Flag Z (Zero)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // Test: 0 / anything = 0 → Z=1
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x000A);
+    const div_zero = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.DIV(&cpu, div_zero);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0000);
+    try expect(cpu.registers.SR.flags.Z == true);
+    try expect(cpu.registers.SR.flags.N == false);
+
+    // Test: Dividend < Divisor → quotient = 0 → Z=1
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0x0005); // 5
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R4), 0x000A); // 10
+    const div_small = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R3, .R4, 0, 0x0000); // 5 / 10 = 0
+    try Instruction.DIV(&cpu, div_small);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R3)) == 0x0000);
+    try expect(cpu.registers.SR.flags.Z == true);
+}
+
+test "DIV - Flag N (Negative)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // Test: Result with bit 15 set → N=1
+    // 0xFFFF (65535) / 0x0001 (1) = 0xFFFF (bit 15 set)
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xFFFF);
+    const div_neg = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R1, .R1, 0, 0x0001);
+    try Instruction.DIV(&cpu, div_neg);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0xFFFF);
+    try expect(cpu.registers.SR.flags.N == true);
+    try expect(cpu.registers.SR.flags.Z == false);
+
+    // Test: 0x8000 / 0x0001 = 0x8000 → N=1
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x8000);
+    const div_neg2 = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R2, .R2, 0, 0x0001);
+    try Instruction.DIV(&cpu, div_neg2);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x8000);
+    try expect(cpu.registers.SR.flags.N == true);
+}
+
+test "DIV - Division by zero" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // Test: Divide by zero → error + V=1 + T=1
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0064);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0000);
+    const div_by_zero = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.DIV(&cpu, div_by_zero);
+    try expect(cpu.registers.SR.flags.T == true); // Trap flag
+
+}
+
+test "DIV - R0 destination (void write)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // DIV R0, Rs, imm → R0 stays 0, but flags are still updated
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x000A);
+    const div_r0 = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R0, .R1, 0, 0x0000);
+    try Instruction.DIV(&cpu, div_r0);
+
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R0)) == 0x0000); // R0 always 0
+    try expect(cpu.registers.SR.flags.Z == true); // But flags updated (0 / 10 = 0)
+}
+
+test "DIVX - Store remainder" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // Enable X flag so DIV stores remainder into Rs
+    cpu.registers.SR.setFlag(.X);
+
+    // Example: 100 / 30 = 3 remainder 10
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0064); // 100
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x001E); // 30
+    const div_with_x = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.DIV(&cpu, div_with_x);
+
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0003); // quotient
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x000A); // remainder (100 - 3*30 = 10)
+
+    try expect(cpu.registers.SR.flags.X == false); // X flag must be clear after the operation.
+}
+
+test "DIVX - Flags Z N C V" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // Case 1: Zero dividend -> Z=1, N=0, V=0, C=0
+    cpu.reset(false);
+    cpu.registers.SR.setFlag(.X);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x1234);
+    const divx_zero = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.DIV(&cpu, divx_zero);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0000);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x0000);
+    try expect(cpu.registers.SR.flags.Z == true);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.V == false);
+    try expect(cpu.registers.SR.flags.C == false);
+
+    // Case 2: 100 / 30 -> quotient 3, remainder 10 -> Z=0, N=0, V=0, C=0
+    cpu.reset(false);
+    cpu.registers.SR.setFlag(.X);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0064);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x001E);
+    const divx_small = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.DIV(&cpu, divx_small);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0003);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x000A);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.V == false);
+    try expect(cpu.registers.SR.flags.C == false);
+
+    // Case 3: MSB set in quotient -> N=1
+    cpu.reset(false);
+    cpu.registers.SR.setFlag(.X);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x8000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0001);
+    const divx_msb = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.DIV(&cpu, divx_msb);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x8000);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x0000);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == true);
+    try expect(cpu.registers.SR.flags.V == false);
+    try expect(cpu.registers.SR.flags.C == false);
+
+    // Case 4: Dividend equals divisor -> quotient 1, remainder 0 -> Z=0, N=0
+    cpu.reset(false);
+    cpu.registers.SR.setFlag(.X);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xFFFF);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0xFFFF);
+    const divx_eq = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.DIV(&cpu, divx_eq);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0001);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x0000);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.V == false);
+    try expect(cpu.registers.SR.flags.C == false);
+}
+
+test "DIV - Edge cases" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // Test: Divide by 1 (identity)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xABCD);
+    const div_one = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R1, .R1, 0, 0x0001);
+    try Instruction.DIV(&cpu, div_one);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0xABCD);
+
+    // Test: Self-divide → result = 1
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0042);
+    const div_self = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R2, .R2, 0, 0x0000);
+    try Instruction.DIV(&cpu, div_self);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x0001); // 0x42 / 0x42 = 1
+
+    // Test: Maximum value / 2
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0xFFFF);
+    const div_max = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R3, .R3, 0, 0x0002);
+    try Instruction.DIV(&cpu, div_max);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R3)) == 0x7FFF); // 65535 / 2 = 32767
+
+    // Test: Large dividend, large divisor
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R4), 0xFFFF); // 65535
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R5), 0xFFFF); // 65535
+    const div_equal = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R4, .R5, 0, 0x0000);
+    try Instruction.DIV(&cpu, div_equal);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R4)) == 0x0001); // 65535 / 65535 = 1
+}
+
+test "DIV - Illegal mode" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+
+    // DIV doesn't support OFFSET_INDEXED mode
+    const div_illegal = Instruction.pack(0, .DIV, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
+    try Instruction.DIV(&cpu, div_illegal);
+    try expect(cpu.registers.SR.flags.T == true); // T flag set on illegal instruction
+}
 
 // test "AND - Basic operations" {
 //     const allocator = std.testing.allocator;

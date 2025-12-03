@@ -340,22 +340,28 @@ pub const Instruction = packed union {
     }
 
     fn AND(cpu: *CPU, instruction: Instruction) !void {
-        const rd_index = instruction.bytecode.rd;
-        const rs_index = instruction.bytecode.rs;
-        const imm16: u16 = instruction.bytecode.imm16;
+        // LOAD/STORE architecture all ALU are registers only.
+        if (instruction.bytecode.mode == @intFromEnum(Mode.OFFSET_INDEXED)) {
+            cpu.registers.SR.setFlag(.T);
+            return;
+        }
+
+        const first_operand: u16 = if (instruction.bytecode.imm16 != 0) cpu.registers.readRegister(instruction.bytecode.rs) else cpu.registers.readRegister(instruction.bytecode.rd);
+        const second_operand: u16 = if (instruction.bytecode.imm16 != 0) instruction.bytecode.imm16 else cpu.registers.readRegister(instruction.bytecode.rs);
 
         if (instruction.bytecode.mode == @intFromEnum(Mode.REGISTER_IMM16)) {
             // AND Rd, Rs, imm16 → Rd = Rs & imm16
-            const rs: u16 = cpu.registers.asArray()[rs_index];
-            const result: u16 = rs & imm16;
+            const result: u16 = first_operand & second_operand;
 
             // Update flags (N, Z) and clear C, V
-            cpu.registers.SR.updateNZ(result);
-            cpu.registers.SR.clearCV();
+            cpu.registers.SR.updateFlag(.N, (result & 0x8000) != 0);
+            cpu.registers.SR.updateFlag(.Z, result == 0);
+            cpu.registers.SR.clearFlag(.C);
+            cpu.registers.SR.clearFlag(.V);
 
             // Write result to Rd (unless Rd is R0, which is always zero)
-            if (rd_index != 0) {
-                cpu.registers.asArray()[rd_index] = result;
+            if (instruction.bytecode.rd != 0) {
+                cpu.registers.writeRegister(instruction.bytecode.rd, result);
             }
         } else {
             // Illegal instruction - set T flag and return error
@@ -364,22 +370,28 @@ pub const Instruction = packed union {
     }
 
     fn OR(cpu: *CPU, instruction: Instruction) !void {
-        const rd_index = instruction.bytecode.rd;
-        const rs_index = instruction.bytecode.rs;
-        const imm16: u16 = instruction.bytecode.imm16;
+        // LOAD/STORE architecture all ALU are registers only.
+        if (instruction.bytecode.mode == @intFromEnum(Mode.OFFSET_INDEXED)) {
+            cpu.registers.SR.setFlag(.T);
+            return;
+        }
+
+        const first_operand: u16 = if (instruction.bytecode.imm16 != 0) cpu.registers.readRegister(instruction.bytecode.rs) else cpu.registers.readRegister(instruction.bytecode.rd);
+        const second_operand: u16 = if (instruction.bytecode.imm16 != 0) instruction.bytecode.imm16 else cpu.registers.readRegister(instruction.bytecode.rs);
 
         if (instruction.bytecode.mode == @intFromEnum(Mode.REGISTER_IMM16)) {
             // OR Rd, Rs, imm16 → Rd = Rs | imm16
-            const rs: u16 = cpu.registers.asArray()[rs_index];
-            const result: u16 = rs | imm16;
+            const result: u16 = first_operand | second_operand;
 
             // Update flags (N, Z) and clear C, V
-            cpu.registers.SR.updateNZ(result);
-            cpu.registers.SR.clearCV();
+            cpu.registers.SR.updateFlag(.N, (result & 0x8000) != 0);
+            cpu.registers.SR.updateFlag(.Z, result == 0);
+            cpu.registers.SR.clearFlag(.C);
+            cpu.registers.SR.clearFlag(.V);
 
             // Write result to Rd (unless Rd is R0, which is always zero)
-            if (rd_index != 0) {
-                cpu.registers.asArray()[rd_index] = result;
+            if (instruction.bytecode.rd != 0) {
+                cpu.registers.writeRegister(instruction.bytecode.rd, result);
             }
         } else {
             // Illegal instruction - set T flag and return error
@@ -388,22 +400,28 @@ pub const Instruction = packed union {
     }
 
     fn XOR(cpu: *CPU, instruction: Instruction) !void {
-        const rd_index = instruction.bytecode.rd;
-        const rs_index = instruction.bytecode.rs;
-        const imm16: u16 = instruction.bytecode.imm16;
+        // LOAD/STORE architecture all ALU are registers only.
+        if (instruction.bytecode.mode == @intFromEnum(Mode.OFFSET_INDEXED)) {
+            cpu.registers.SR.setFlag(.T);
+            return;
+        }
+
+        const first_operand: u16 = if (instruction.bytecode.imm16 != 0) cpu.registers.readRegister(instruction.bytecode.rs) else cpu.registers.readRegister(instruction.bytecode.rd);
+        const second_operand: u16 = if (instruction.bytecode.imm16 != 0) instruction.bytecode.imm16 else cpu.registers.readRegister(instruction.bytecode.rs);
 
         if (instruction.bytecode.mode == @intFromEnum(Mode.REGISTER_IMM16)) {
             // XOR Rd, Rs, imm16 → Rd = Rs ^ imm16
-            const rs: u16 = cpu.registers.asArray()[rs_index];
-            const result: u16 = rs ^ imm16;
+            const result: u16 = first_operand ^ second_operand;
 
             // Update flags (N, Z) and clear C, V
-            cpu.registers.SR.updateNZ(result);
-            cpu.registers.SR.clearCV();
+            cpu.registers.SR.updateFlag(.N, (result & 0x8000) != 0);
+            cpu.registers.SR.updateFlag(.Z, result == 0);
+            cpu.registers.SR.clearFlag(.C);
+            cpu.registers.SR.clearFlag(.V);
 
             // Write result to Rd (unless Rd is R0, which is always zero)
-            if (rd_index != 0) {
-                cpu.registers.asArray()[rd_index] = result;
+            if (instruction.bytecode.rd != 0) {
+                cpu.registers.writeRegister(instruction.bytecode.rd, result);
             }
         } else {
             // Illegal instruction - set T flag and return error
@@ -1649,260 +1667,260 @@ test "DIV - Illegal mode" {
     try expect(cpu.registers.SR.flags.T == true); // T flag set on illegal instruction
 }
 
-// test "AND - Basic operations" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
+test "AND - Basic operations" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
 
-//     cpu.reset(false);
+    cpu.reset(false);
 
-//     // Test 1: AND Rd, Rs, imm16 → Rd = Rs & imm16
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] = 0xFF0F;
-//     const and_imm = Instruction.pack(0, .AND, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x00FF);
-//     try Instruction.AND(&cpu, and_imm);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == 0x000F);
-//     try expect(cpu.registers.SR.flags.Z == false);
-//     try expect(cpu.registers.SR.flags.N == false);
-//     try expect(cpu.registers.SR.flags.C == false); // Cleared
-//     try expect(cpu.registers.SR.flags.V == false); // Cleared
+    // Test 1: AND Rd, Rs, imm16 → Rd = Rs & imm16
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0xFF0F);
+    const and_imm = Instruction.pack(0, .AND, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x00FF);
+    try Instruction.AND(&cpu, and_imm);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x000F);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.C == false); // Cleared
+    try expect(cpu.registers.SR.flags.V == false); // Cleared
 
-//     // Test 2: AND with all bits set
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0xABCD;
-//     const and_all = Instruction.pack(0, .AND, .REGISTER_IMM16, 0, .R4, .R3, 0, 0xFFFF);
-//     try Instruction.AND(&cpu, and_all);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] == 0xABCD);
+    // Test 2: AND with all bits set
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0xABCD);
+    const and_all = Instruction.pack(0, .AND, .REGISTER_IMM16, 0, .R4, .R3, 0, 0xFFFF);
+    try Instruction.AND(&cpu, and_all);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R4)) == 0xABCD);
 
-//     // Test 3: Mask operation
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R5)] = 0x1234;
-//     const and_mask = Instruction.pack(0, .AND, .REGISTER_IMM16, 0, .R6, .R5, 0, 0x0F0F);
-//     try Instruction.AND(&cpu, and_mask);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R6)] == 0x0204);
-// }
+    // Test 3: Mask operation
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R5), 0x1234);
+    const and_mask = Instruction.pack(0, .AND, .REGISTER_IMM16, 0, .R6, .R5, 0, 0x0F0F);
+    try Instruction.AND(&cpu, and_mask);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R6)) == 0x0204);
+}
 
-// test "AND - Flag Z (Zero)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
+test "AND - Flag Z (Zero)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
 
-//     cpu.reset(false);
+    cpu.reset(false);
 
-//     // Test: No common bits → Z=1
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0xFF00;
-//     const and_zero = Instruction.pack(0, .AND, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x00FF);
-//     try Instruction.AND(&cpu, and_zero);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x0000);
-//     try expect(cpu.registers.SR.flags.Z == true);
-//     try expect(cpu.registers.SR.flags.N == false);
-// }
+    // Test: No common bits → Z=1
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xFF00);
+    const and_zero = Instruction.pack(0, .AND, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x00FF);
+    try Instruction.AND(&cpu, and_zero);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x0000);
+    try expect(cpu.registers.SR.flags.Z == true);
+    try expect(cpu.registers.SR.flags.N == false);
+}
 
-// test "AND - Flag N (Negative)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
+test "AND - Flag N (Negative)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
 
-//     cpu.reset(false);
+    cpu.reset(false);
 
-//     // Test: Result with bit 15 set → N=1
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0xFFFF;
-//     const and_neg = Instruction.pack(0, .AND, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x8000);
-//     try Instruction.AND(&cpu, and_neg);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x8000);
-//     try expect(cpu.registers.SR.flags.N == true);
-//     try expect(cpu.registers.SR.flags.Z == false);
-// }
+    // Test: Result with bit 15 set → N=1
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xFFFF);
+    const and_neg = Instruction.pack(0, .AND, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x8000);
+    try Instruction.AND(&cpu, and_neg);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x8000);
+    try expect(cpu.registers.SR.flags.N == true);
+    try expect(cpu.registers.SR.flags.Z == false);
+}
 
-// test "AND - R0 destination and illegal mode" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
+test "AND - R0 destination and illegal mode" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
 
-//     cpu.reset(false);
+    cpu.reset(false);
 
-//     // AND R0, Rs, imm → R0 stays 0, but flags updated
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0xFFFF;
-//     const and_r0 = Instruction.pack(0, .AND, .REGISTER_IMM16, 0, .R0, .R1, 0, 0xFFFF);
-//     try Instruction.AND(&cpu, and_r0);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R0)] == 0x0000);
-//     try expect(cpu.registers.SR.flags.N == true); // Flags still updated
+    // AND R0, Rs, imm → R0 stays 0, but flags updated
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xFFFF);
+    const and_r0 = Instruction.pack(0, .AND, .REGISTER_IMM16, 0, .R0, .R1, 0, 0xFFFF);
+    try Instruction.AND(&cpu, and_r0);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R0)) == 0x0000);
+    try expect(cpu.registers.SR.flags.N == true); // Flags still updated
 
-//     // Illegal mode
-//     cpu.reset(false);
-//     const and_illegal = Instruction.pack(0, .AND, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
-//     try Instruction.AND(&cpu, and_illegal);
-//     try expect(cpu.registers.SR.flags.T == true);
-// }
+    // Illegal mode
+    cpu.reset(false);
+    const and_illegal = Instruction.pack(0, .AND, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
+    try Instruction.AND(&cpu, and_illegal);
+    try expect(cpu.registers.SR.flags.T == true);
+}
 
-// test "OR - Basic operations" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
+test "OR - Basic operations" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
 
-//     cpu.reset(false);
+    cpu.reset(false);
 
-//     // Test 1: OR Rd, Rs, imm16 → Rd = Rs | imm16
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] = 0x00F0;
-//     const or_imm = Instruction.pack(0, .OR, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0F00);
-//     try Instruction.OR(&cpu, or_imm);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == 0x0FF0);
-//     try expect(cpu.registers.SR.flags.Z == false);
-//     try expect(cpu.registers.SR.flags.N == false);
-//     try expect(cpu.registers.SR.flags.C == false); // Cleared
-//     try expect(cpu.registers.SR.flags.V == false); // Cleared
+    // Test 1: OR Rd, Rs, imm16 → Rd = Rs | imm16
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x00F0);
+    const or_imm = Instruction.pack(0, .OR, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0F00);
+    try Instruction.OR(&cpu, or_imm);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0x0FF0);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == false);
+    try expect(cpu.registers.SR.flags.C == false); // Cleared
+    try expect(cpu.registers.SR.flags.V == false); // Cleared
 
-//     // Test 2: OR with zero (identity)
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0xABCD;
-//     const or_zero = Instruction.pack(0, .OR, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0000);
-//     try Instruction.OR(&cpu, or_zero);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] == 0xABCD);
+    // Test 2: OR with zero (identity)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0xABCD);
+    const or_zero = Instruction.pack(0, .OR, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0000);
+    try Instruction.OR(&cpu, or_zero);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R4)) == 0xABCD);
 
-//     // Test 3: Set bits
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R5)] = 0x1200;
-//     const or_set = Instruction.pack(0, .OR, .REGISTER_IMM16, 0, .R6, .R5, 0, 0x0034);
-//     try Instruction.OR(&cpu, or_set);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R6)] == 0x1234);
-// }
+    // Test 3: Set bits
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R5), 0x1200);
+    const or_set = Instruction.pack(0, .OR, .REGISTER_IMM16, 0, .R6, .R5, 0, 0x0034);
+    try Instruction.OR(&cpu, or_set);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R6)) == 0x1234);
+}
 
-// test "OR - Flag Z (Zero)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
+test "OR - Flag Z (Zero)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
 
-//     cpu.reset(false);
+    cpu.reset(false);
 
-//     // Test: 0 | 0 = 0 → Z=1
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0000;
-//     const or_zero = Instruction.pack(0, .OR, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0000);
-//     try Instruction.OR(&cpu, or_zero);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x0000);
-//     try expect(cpu.registers.SR.flags.Z == true);
-//     try expect(cpu.registers.SR.flags.N == false);
-// }
+    // Test: 0 | 0 = 0 → Z=1
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0000);
+    const or_zero = Instruction.pack(0, .OR, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0000);
+    try Instruction.OR(&cpu, or_zero);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x0000);
+    try expect(cpu.registers.SR.flags.Z == true);
+    try expect(cpu.registers.SR.flags.N == false);
+}
 
-// test "OR - Flag N (Negative)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
+test "OR - Flag N (Negative)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
 
-//     cpu.reset(false);
+    cpu.reset(false);
 
-//     // Test: Result with bit 15 set → N=1
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x7000;
-//     const or_neg = Instruction.pack(0, .OR, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x8000);
-//     try Instruction.OR(&cpu, or_neg);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0xF000);
-//     try expect(cpu.registers.SR.flags.N == true);
-//     try expect(cpu.registers.SR.flags.Z == false);
-// }
+    // Test: Result with bit 15 set → N=1
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x7000);
+    const or_neg = Instruction.pack(0, .OR, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x8000);
+    try Instruction.OR(&cpu, or_neg);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0xF000);
+    try expect(cpu.registers.SR.flags.N == true);
+    try expect(cpu.registers.SR.flags.Z == false);
+}
 
-// test "OR - R0 destination and illegal mode" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
+test "OR - R0 destination and illegal mode" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
 
-//     cpu.reset(false);
+    cpu.reset(false);
 
-//     // OR R0, Rs, imm → R0 stays 0, but flags updated
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x8000;
-//     const or_r0 = Instruction.pack(0, .OR, .REGISTER_IMM16, 0, .R0, .R1, 0, 0x0001);
-//     try Instruction.OR(&cpu, or_r0);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R0)] == 0x0000);
-//     try expect(cpu.registers.SR.flags.N == true); // Flags still updated
+    // OR R0, Rs, imm → R0 stays 0, but flags updated
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x8000);
+    const or_r0 = Instruction.pack(0, .OR, .REGISTER_IMM16, 0, .R0, .R1, 0, 0x0001);
+    try Instruction.OR(&cpu, or_r0);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R0)) == 0x0000);
+    try expect(cpu.registers.SR.flags.N == true); // Flags still updated
 
-//     // Illegal mode
-//     cpu.reset(false);
-//     const or_illegal = Instruction.pack(0, .OR, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
-//     try Instruction.OR(&cpu, or_illegal);
-//     try expect(cpu.registers.SR.flags.T == true);
-// }
+    // Illegal mode
+    cpu.reset(false);
+    const or_illegal = Instruction.pack(0, .OR, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
+    try Instruction.OR(&cpu, or_illegal);
+    try expect(cpu.registers.SR.flags.T == true);
+}
 
-// test "XOR - Basic operations" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
+test "XOR - Basic operations" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
 
-//     cpu.reset(false);
+    cpu.reset(false);
 
-//     // Test 1: XOR Rd, Rs, imm16 → Rd = Rs ^ imm16
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] = 0xFFFF;
-//     const xor_imm = Instruction.pack(0, .XOR, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x00FF);
-//     try Instruction.XOR(&cpu, xor_imm);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] == 0xFF00);
-//     try expect(cpu.registers.SR.flags.Z == false);
-//     try expect(cpu.registers.SR.flags.N == true); // Bit 15 set
-//     try expect(cpu.registers.SR.flags.C == false); // Cleared
-//     try expect(cpu.registers.SR.flags.V == false); // Cleared
+    // Test 1: XOR Rd, Rs, imm16 → Rd = Rs ^ imm16
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0xFFFF);
+    const xor_imm = Instruction.pack(0, .XOR, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x00FF);
+    try Instruction.XOR(&cpu, xor_imm);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0xFF00);
+    try expect(cpu.registers.SR.flags.Z == false);
+    try expect(cpu.registers.SR.flags.N == true); // Bit 15 set
+    try expect(cpu.registers.SR.flags.C == false); // Cleared
+    try expect(cpu.registers.SR.flags.V == false); // Cleared
 
-//     // Test 2: XOR with zero (identity)
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0xABCD;
-//     const xor_zero = Instruction.pack(0, .XOR, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0000);
-//     try Instruction.XOR(&cpu, xor_zero);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] == 0xABCD);
+    // Test 2: XOR with zero (identity)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0xABCD);
+    const xor_zero = Instruction.pack(0, .XOR, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0000);
+    try Instruction.XOR(&cpu, xor_zero);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R4)) == 0xABCD);
 
-//     // Test 3: Toggle bits
-//     cpu.reset(false);
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R5)] = 0x1234;
-//     const xor_toggle = Instruction.pack(0, .XOR, .REGISTER_IMM16, 0, .R6, .R5, 0, 0xFFFF);
-//     try Instruction.XOR(&cpu, xor_toggle);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R6)] == 0xEDCB); // Inverted
-// }
+    // Test 3: Toggle bits
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R5), 0x1234);
+    const xor_toggle = Instruction.pack(0, .XOR, .REGISTER_IMM16, 0, .R6, .R5, 0, 0xFFFF);
+    try Instruction.XOR(&cpu, xor_toggle);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R6)) == 0xEDCB); // Inverted
+}
 
-// test "XOR - Flag Z (Zero)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
+test "XOR - Flag Z (Zero)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
 
-//     cpu.reset(false);
+    cpu.reset(false);
 
-//     // Test: Same value XOR → Z=1 (self-cancel)
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x1234;
-//     const xor_zero = Instruction.pack(0, .XOR, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x1234);
-//     try Instruction.XOR(&cpu, xor_zero);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x0000);
-//     try expect(cpu.registers.SR.flags.Z == true);
-//     try expect(cpu.registers.SR.flags.N == false);
-// }
+    // Test: Same value XOR → Z=1 (self-cancel)
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x1234);
+    const xor_zero = Instruction.pack(0, .XOR, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x1234);
+    try Instruction.XOR(&cpu, xor_zero);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x0000);
+    try expect(cpu.registers.SR.flags.Z == true);
+    try expect(cpu.registers.SR.flags.N == false);
+}
 
-// test "XOR - Flag N (Negative)" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
+test "XOR - Flag N (Negative)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
 
-//     cpu.reset(false);
+    cpu.reset(false);
 
-//     // Test: Result with bit 15 set → N=1
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x7FFF;
-//     const xor_neg = Instruction.pack(0, .XOR, .REGISTER_IMM16, 0, .R2, .R1, 0, 0xFFFF);
-//     try Instruction.XOR(&cpu, xor_neg);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x8000);
-//     try expect(cpu.registers.SR.flags.N == true);
-//     try expect(cpu.registers.SR.flags.Z == false);
-// }
+    // Test: Result with bit 15 set → N=1
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x7FFF);
+    const xor_neg = Instruction.pack(0, .XOR, .REGISTER_IMM16, 0, .R2, .R1, 0, 0xFFFF);
+    try Instruction.XOR(&cpu, xor_neg);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x8000);
+    try expect(cpu.registers.SR.flags.N == true);
+    try expect(cpu.registers.SR.flags.Z == false);
+}
 
-// test "XOR - R0 destination and illegal mode" {
-//     const allocator = std.testing.allocator;
-//     var cpu = try CPU.init(allocator);
-//     defer cpu.deinit(allocator);
+test "XOR - R0 destination and illegal mode" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
 
-//     cpu.reset(false);
+    cpu.reset(false);
 
-//     // XOR R0, Rs, imm → R0 stays 0, but flags updated
-//     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0xFFFF;
-//     const xor_r0 = Instruction.pack(0, .XOR, .REGISTER_IMM16, 0, .R0, .R1, 0, 0x7FFF);
-//     try Instruction.XOR(&cpu, xor_r0);
-//     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R0)] == 0x0000);
-//     try expect(cpu.registers.SR.flags.N == true); // Flags still updated (result would be 0x8000)
+    // XOR R0, Rs, imm → R0 stays 0, but flags updated
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xFFFF);
+    const xor_r0 = Instruction.pack(0, .XOR, .REGISTER_IMM16, 0, .R0, .R1, 0, 0x7FFF);
+    try Instruction.XOR(&cpu, xor_r0);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R0)) == 0x0000);
+    try expect(cpu.registers.SR.flags.N == true); // Flags still updated (result would be 0x8000)
 
-//     // Illegal mode
-//     cpu.reset(false);
-//     const xor_illegal = Instruction.pack(0, .XOR, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
-//     try Instruction.XOR(&cpu, xor_illegal);
-//     try expect(cpu.registers.SR.flags.T == true);
-// }
+    // Illegal mode
+    cpu.reset(false);
+    const xor_illegal = Instruction.pack(0, .XOR, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
+    try Instruction.XOR(&cpu, xor_illegal);
+    try expect(cpu.registers.SR.flags.T == true);
+}
 
 // test "ROL - Basic operations" {
 //     const allocator = std.testing.allocator;

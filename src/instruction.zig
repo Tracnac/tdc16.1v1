@@ -12,22 +12,23 @@ pub const Mode = enum(u1) { REGISTER_IMM16 = 0, OFFSET_INDEXED };
 pub const Opcode = enum(u4) {
     FREE = 0,
     B,
-    LD,
+    LD, // LD -(SP), Rs => PUSH / LD Rd, (SP)+ POP
     ST,
-    ADD,
-    SUB,
-    MUL,
-    DIV,
+    ADD, // ADDX => ADC
+    SUB, // SUBX => SBC
+    MUL, // MULX => 32-bit
+    DIV, // DIVX => Rd:Q RS:R
     AND,
     OR,
     XOR,
     ROL,
     ROR,
-    SHL,
-    SHR,
+    LSL,
+    LSR, // LSRX => ASR
     SWI,
 };
 
+// Bxx.L => -(SP)=PC and Branch
 pub const Condition = enum(u4) {
     EQ = 0,
     NE,
@@ -43,8 +44,8 @@ pub const Condition = enum(u4) {
     LT,
     GT,
     LE,
-    PR,
-    A,
+    PR, // BPR.B    => TEST bits
+    A, // BA (SP)+ => RTS
 };
 
 // Condition alias
@@ -495,13 +496,13 @@ pub const Instruction = packed union {
         }
     }
 
-    fn SHL(cpu: *CPU, instruction: Instruction) !void {
+    fn LSL(cpu: *CPU, instruction: Instruction) !void {
         const rd_index = instruction.bytecode.rd;
         const rs_index = instruction.bytecode.rs;
         const imm16: u16 = instruction.bytecode.imm16;
 
         if (instruction.bytecode.mode == @intFromEnum(Mode.REGISTER_IMM16)) {
-            // SHL Rd, Rs, imm16 → Rd = Rd << (Rs + imm16) & 0xF
+            // LSL Rd, Rs, imm16 → Rd = Rd << (Rs + imm16) & 0xF
             // const rd: u16 = cpu.registers.asArray()[rd_index];
             const rs: u16 = cpu.registers.asArray()[rs_index];
             const shift: u16 = (rs +% imm16) & 0x000F; // Max shift is 15
@@ -528,13 +529,13 @@ pub const Instruction = packed union {
         }
     }
 
-    fn SHR(cpu: *CPU, instruction: Instruction) !void {
+    fn LSR(cpu: *CPU, instruction: Instruction) !void {
         const rd_index = instruction.bytecode.rd;
         const rs_index = instruction.bytecode.rs;
         const imm16: u16 = instruction.bytecode.imm16;
 
         if (instruction.bytecode.mode == @intFromEnum(Mode.REGISTER_IMM16)) {
-            // SHR Rd, Rs, imm16 → Rd = Rd >> (Rs + imm16) & 0xF
+            // LSR Rd, Rs, imm16 → Rd = Rd >> (Rs + imm16) & 0xF
             // const rd: u16 = cpu.registers.asArray()[rd_index];
             const rs: u16 = cpu.registers.asArray()[rs_index];
             const shift: u16 = (rs +% imm16) & 0x000F; // Max shift is 15
@@ -581,8 +582,8 @@ test "Opcode enum values" {
     try expect(@intFromEnum(Opcode.XOR) == 10);
     try expect(@intFromEnum(Opcode.ROL) == 11);
     try expect(@intFromEnum(Opcode.ROR) == 12);
-    try expect(@intFromEnum(Opcode.SHL) == 13);
-    try expect(@intFromEnum(Opcode.SHR) == 14);
+    try expect(@intFromEnum(Opcode.LSL) == 13);
+    try expect(@intFromEnum(Opcode.LSR) == 14);
     try expect(@intFromEnum(Opcode.SWI) == 15);
 }
 
@@ -2159,63 +2160,63 @@ test "XOR - R0 destination and illegal mode" {
 //     try expect(cpu.registers.SR.flags.T == true);
 // }
 
-// test "SHL - Basic operations" {
+// test "LSL - Basic operations" {
 //     const allocator = std.testing.allocator;
 //     var cpu = try CPU.init(allocator);
 //     defer cpu.deinit(allocator);
 
 //     cpu.reset(false);
 
-//     // Test 1: SHL by 1
+//     // Test 1: LSL by 1
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0001;
-//     const shl_one = Instruction.pack(0, .SHL, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0001);
-//     try Instruction.SHL(&cpu, shl_one);
+//     const shl_one = Instruction.pack(0, .LSL, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0001);
+//     try Instruction.LSL(&cpu, shl_one);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x0002);
 //     try expect(cpu.registers.SR.flags.C == false); // (0x0001 >> 15) & 0x1 = 0
 //     try expect(cpu.registers.SR.flags.V == false);
 
-//     // Test 2: SHL by 4
+//     // Test 2: LSL by 4
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0x0123;
-//     const shl_four = Instruction.pack(0, .SHL, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0004);
-//     try Instruction.SHL(&cpu, shl_four);
+//     const shl_four = Instruction.pack(0, .LSL, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0004);
+//     try Instruction.LSL(&cpu, shl_four);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] == 0x1230);
 //     try expect(cpu.registers.SR.flags.C == false); // (0x0123 >> 12) & 0x1 = 0
 
-//     // Test 3: SHL with carry out
+//     // Test 3: LSL with carry out
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R5)] = 0x8000;
-//     const shl_carry = Instruction.pack(0, .SHL, .REGISTER_IMM16, 0, .R6, .R5, 0, 0x0001);
-//     try Instruction.SHL(&cpu, shl_carry);
+//     const shl_carry = Instruction.pack(0, .LSL, .REGISTER_IMM16, 0, .R6, .R5, 0, 0x0001);
+//     try Instruction.LSL(&cpu, shl_carry);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R6)] == 0x0000); // Shifted out
 //     try expect(cpu.registers.SR.flags.C == true); // (0x8000 >> 15) & 0x1 = 1
 //     try expect(cpu.registers.SR.flags.Z == true);
 // }
 
-// test "SHL - Large shifts" {
+// test "LSL - Large shifts" {
 //     const allocator = std.testing.allocator;
 //     var cpu = try CPU.init(allocator);
 //     defer cpu.deinit(allocator);
 
-//     // Test: SHL by 8
+//     // Test: LSL by 8
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x00FF;
-//     const shl_eight = Instruction.pack(0, .SHL, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0008);
-//     try Instruction.SHL(&cpu, shl_eight);
+//     const shl_eight = Instruction.pack(0, .LSL, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0008);
+//     try Instruction.LSL(&cpu, shl_eight);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0xFF00);
 //     try expect(cpu.registers.SR.flags.C == false); // (0x00FF >> 8) & 0x1 = 0
 
-//     // Test: SHL by 15
+//     // Test: LSL by 15
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0xFFFF;
-//     const shl_fifteen = Instruction.pack(0, .SHL, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x000F);
-//     try Instruction.SHL(&cpu, shl_fifteen);
+//     const shl_fifteen = Instruction.pack(0, .LSL, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x000F);
+//     try Instruction.LSL(&cpu, shl_fifteen);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] == 0x8000);
 //     try expect(cpu.registers.SR.flags.C == true); // (0xFFFF >> 1) & 0x1 = 1
 //     try expect(cpu.registers.SR.flags.N == true);
 // }
 
-// test "SHL - Flag Z and N" {
+// test "LSL - Flag Z and N" {
 //     const allocator = std.testing.allocator;
 //     var cpu = try CPU.init(allocator);
 //     defer cpu.deinit(allocator);
@@ -2223,20 +2224,20 @@ test "XOR - R0 destination and illegal mode" {
 //     // Test Z flag
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0000;
-//     const shl_zero = Instruction.pack(0, .SHL, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0004);
-//     try Instruction.SHL(&cpu, shl_zero);
+//     const shl_zero = Instruction.pack(0, .LSL, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0004);
+//     try Instruction.LSL(&cpu, shl_zero);
 //     try expect(cpu.registers.SR.flags.Z == true);
 
 //     // Test N flag
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0x4000;
-//     const shl_neg = Instruction.pack(0, .SHL, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0001);
-//     try Instruction.SHL(&cpu, shl_neg);
+//     const shl_neg = Instruction.pack(0, .LSL, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0001);
+//     try Instruction.LSL(&cpu, shl_neg);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] == 0x8000);
 //     try expect(cpu.registers.SR.flags.N == true);
 // }
 
-// test "SHL - Shift amount masking and R0" {
+// test "LSL - Shift amount masking and R0" {
 //     const allocator = std.testing.allocator;
 //     var cpu = try CPU.init(allocator);
 //     defer cpu.deinit(allocator);
@@ -2245,97 +2246,97 @@ test "XOR - R0 destination and illegal mode" {
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0001;
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] = 0x0014; // 20, masked to 4
-//     const shl_mask = Instruction.pack(0, .SHL, .REGISTER_IMM16, 0, .R3, .R2, 0, 0x0000);
-//     try Instruction.SHL(&cpu, shl_mask);
+//     const shl_mask = Instruction.pack(0, .LSL, .REGISTER_IMM16, 0, .R3, .R2, 0, 0x0000);
+//     try Instruction.LSL(&cpu, shl_mask);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] == 0x0010); // Shifted left by 4
 
 //     // Test: R0 destination
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] = 0x4000;
-//     const shl_r0 = Instruction.pack(0, .SHL, .REGISTER_IMM16, 0, .R0, .R4, 0, 0x0001);
-//     try Instruction.SHL(&cpu, shl_r0);
+//     const shl_r0 = Instruction.pack(0, .LSL, .REGISTER_IMM16, 0, .R0, .R4, 0, 0x0001);
+//     try Instruction.LSL(&cpu, shl_r0);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R0)] == 0x0000);
 //     try expect(cpu.registers.SR.flags.C == false); // (0x4000 >> 15) & 0x1 = 0
 //     try expect(cpu.registers.SR.flags.N == true); // Result would be 0x8000
 // }
 
-// test "SHL - Zero shift and illegal mode" {
+// test "LSL - Zero shift and illegal mode" {
 //     const allocator = std.testing.allocator;
 //     var cpu = try CPU.init(allocator);
 //     defer cpu.deinit(allocator);
 
-//     // Test: SHL by 0
+//     // Test: LSL by 0
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x1234;
-//     const shl_zero = Instruction.pack(0, .SHL, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0000);
-//     try Instruction.SHL(&cpu, shl_zero);
+//     const shl_zero = Instruction.pack(0, .LSL, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0000);
+//     try Instruction.LSL(&cpu, shl_zero);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x1234);
 //     try expect(cpu.registers.SR.flags.C == false);
 
 //     // Illegal mode
 //     cpu.reset(false);
-//     const shl_illegal = Instruction.pack(0, .SHL, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
-//     _ = Instruction.SHL(&cpu, shl_illegal) catch {};
+//     const shl_illegal = Instruction.pack(0, .LSL, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
+//     _ = Instruction.LSL(&cpu, shl_illegal) catch {};
 //     try expect(cpu.registers.SR.flags.T == true);
 // }
 
-// test "SHR - Basic operations" {
+// test "LSR - Basic operations" {
 //     const allocator = std.testing.allocator;
 //     var cpu = try CPU.init(allocator);
 //     defer cpu.deinit(allocator);
 
 //     cpu.reset(false);
 
-//     // Test 1: SHR by 1
+//     // Test 1: LSR by 1
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x8000;
-//     const shr_one = Instruction.pack(0, .SHR, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0001);
-//     try Instruction.SHR(&cpu, shr_one);
+//     const shr_one = Instruction.pack(0, .LSR, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0001);
+//     try Instruction.LSR(&cpu, shr_one);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x4000);
 //     try expect(cpu.registers.SR.flags.C == false); // (0x8000 >> 0) & 0x1 = 0
 //     try expect(cpu.registers.SR.flags.N == false); // Logical shift, no sign extension
 //     try expect(cpu.registers.SR.flags.V == false);
 
-//     // Test 2: SHR by 4
+//     // Test 2: LSR by 4
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0x1230;
-//     const shr_four = Instruction.pack(0, .SHR, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0004);
-//     try Instruction.SHR(&cpu, shr_four);
+//     const shr_four = Instruction.pack(0, .LSR, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0004);
+//     try Instruction.LSR(&cpu, shr_four);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] == 0x0123);
 //     try expect(cpu.registers.SR.flags.C == false); // (0x1230 >> 3) & 0x1 = 0x246 & 0x1 = 0
 
-//     // Test 3: SHR with carry out
+//     // Test 3: LSR with carry out
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R5)] = 0x0001;
-//     const shr_carry = Instruction.pack(0, .SHR, .REGISTER_IMM16, 0, .R6, .R5, 0, 0x0001);
-//     try Instruction.SHR(&cpu, shr_carry);
+//     const shr_carry = Instruction.pack(0, .LSR, .REGISTER_IMM16, 0, .R6, .R5, 0, 0x0001);
+//     try Instruction.LSR(&cpu, shr_carry);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R6)] == 0x0000);
 //     try expect(cpu.registers.SR.flags.C == true); // (0x0001 >> 0) & 0x1 = 1
 //     try expect(cpu.registers.SR.flags.Z == true);
 // }
 
-// test "SHR - Large shifts" {
+// test "LSR - Large shifts" {
 //     const allocator = std.testing.allocator;
 //     var cpu = try CPU.init(allocator);
 //     defer cpu.deinit(allocator);
 
-//     // Test: SHR by 8
+//     // Test: LSR by 8
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0xFF00;
-//     const shr_eight = Instruction.pack(0, .SHR, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0008);
-//     try Instruction.SHR(&cpu, shr_eight);
+//     const shr_eight = Instruction.pack(0, .LSR, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0008);
+//     try Instruction.LSR(&cpu, shr_eight);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x00FF);
 //     try expect(cpu.registers.SR.flags.C == false); // (0xFF00 >> 7) & 0x1 = 0x1FE & 0x1 = 0
 
-//     // Test: SHR by 15
+//     // Test: LSR by 15
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0xFFFF;
-//     const shr_fifteen = Instruction.pack(0, .SHR, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x000F);
-//     try Instruction.SHR(&cpu, shr_fifteen);
+//     const shr_fifteen = Instruction.pack(0, .LSR, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x000F);
+//     try Instruction.LSR(&cpu, shr_fifteen);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] == 0x0001);
 //     try expect(cpu.registers.SR.flags.C == true); // (0xFFFF >> 14) & 0x1 = 1
 // }
 
-// test "SHR - Flag Z and N" {
+// test "LSR - Flag Z and N" {
 //     const allocator = std.testing.allocator;
 //     var cpu = try CPU.init(allocator);
 //     defer cpu.deinit(allocator);
@@ -2343,20 +2344,20 @@ test "XOR - R0 destination and illegal mode" {
 //     // Test Z flag
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x0001;
-//     const shr_zero = Instruction.pack(0, .SHR, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0001);
-//     try Instruction.SHR(&cpu, shr_zero);
+//     const shr_zero = Instruction.pack(0, .LSR, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0001);
+//     try Instruction.LSR(&cpu, shr_zero);
 //     try expect(cpu.registers.SR.flags.Z == true);
 
 //     // Test N flag (should always be 0 for logical shift right)
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] = 0xFFFF;
-//     const shr_no_neg = Instruction.pack(0, .SHR, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0001);
-//     try Instruction.SHR(&cpu, shr_no_neg);
+//     const shr_no_neg = Instruction.pack(0, .LSR, .REGISTER_IMM16, 0, .R4, .R3, 0, 0x0001);
+//     try Instruction.LSR(&cpu, shr_no_neg);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] == 0x7FFF);
 //     try expect(cpu.registers.SR.flags.N == false); // Bit 15 is 0 after logical shift
 // }
 
-// test "SHR - Shift amount masking and R0" {
+// test "LSR - Shift amount masking and R0" {
 //     const allocator = std.testing.allocator;
 //     var cpu = try CPU.init(allocator);
 //     defer cpu.deinit(allocator);
@@ -2365,32 +2366,32 @@ test "XOR - R0 destination and illegal mode" {
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x1000;
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] = 0x0018; // 24, masked to 8
-//     const shr_mask = Instruction.pack(0, .SHR, .REGISTER_IMM16, 0, .R3, .R2, 0, 0x0000);
-//     try Instruction.SHR(&cpu, shr_mask);
+//     const shr_mask = Instruction.pack(0, .LSR, .REGISTER_IMM16, 0, .R3, .R2, 0, 0x0000);
+//     try Instruction.LSR(&cpu, shr_mask);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R3)] == 0x0010); // Shifted right by 8
 //     // Test: R0 destination
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R4)] = 0x0003;
-//     const shr_r0 = Instruction.pack(0, .SHR, .REGISTER_IMM16, 0, .R0, .R4, 0, 0x0001);
-//     try Instruction.SHR(&cpu, shr_r0);
+//     const shr_r0 = Instruction.pack(0, .LSR, .REGISTER_IMM16, 0, .R0, .R4, 0, 0x0001);
+//     try Instruction.LSR(&cpu, shr_r0);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R0)] == 0x0000);
 //     try expect(cpu.registers.SR.flags.C == true); // (0x0003 >> 0) & 0x1 = 1
 // }
-// test "SHR - Zero shift and illegal mode" {
+// test "LSR - Zero shift and illegal mode" {
 //     const allocator = std.testing.allocator;
 //     var cpu = try CPU.init(allocator);
 //     defer cpu.deinit(allocator);
-//     // Test: SHR by 0
+//     // Test: LSR by 0
 //     cpu.reset(false);
 //     cpu.registers.asArray()[@intFromEnum(RegistersName.R1)] = 0x1234;
-//     const shr_zero = Instruction.pack(0, .SHR, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0000);
-//     try Instruction.SHR(&cpu, shr_zero);
+//     const shr_zero = Instruction.pack(0, .LSR, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0000);
+//     try Instruction.LSR(&cpu, shr_zero);
 //     try expect(cpu.registers.asArray()[@intFromEnum(RegistersName.R2)] == 0x1234);
 //     try expect(cpu.registers.SR.flags.C == false);
 
 //     // Illegal mode
 //     cpu.reset(false);
-//     const shr_illegal = Instruction.pack(0, .SHR, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
-//     _ = Instruction.SHR(&cpu, shr_illegal) catch {};
+//     const shr_illegal = Instruction.pack(0, .LSR, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
+//     _ = Instruction.LSR(&cpu, shr_illegal) catch {};
 //     try expect(cpu.registers.SR.flags.T == true);
 // }

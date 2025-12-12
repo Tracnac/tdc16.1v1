@@ -28,24 +28,23 @@ pub const Opcode = enum(u4) {
     SWI,
 };
 
-// Bxx.L => -(SP)=PC and Branch
 pub const Condition = enum(u4) {
-    EQ = 0,
-    NE,
-    CS,
-    CC,
-    MI,
-    PL,
-    VS,
-    VC,
-    HI,
-    LS,
-    GE,
-    LT,
-    GT,
-    LE,
-    PR, // BPR.B    => TEST bits
-    A, // BA (SP)+ => RTS
+    EQ = 0, // EQ (EQUAL : Z = 1),
+    NE, // NE (NOT EQUAL : Z = 0)
+    CS, // CS (CARRY SET : C = 1)
+    CC, // CC (CARRY CLEAR : C = 0)
+    MI, // MI (MINUS / NEGATIVE : N = 1)
+    PL, // PL (PLUS / POSITIVE OR ZERO : N = 0)
+    VS, // VS (OVERFLOW SET : V = 1)
+    VC, // VC (OVERFLOW CLEAR : V = 0)
+    HI, // HI (HIGHER : UNSIGNED > : C = 1 AND Z = 0)
+    LS, // LS (LOWER OR SAME : UNSIGNED <= : C = 0 OR Z = 1)
+    GE, // GE (GREATER OR EQUAL : SIGNED >= : N == V)
+    LT, // LT (LESS THAN : SIGNED < : N != V)
+    GT, // GT (GREATER THAN : SIGNED > : Z = 0 AND N == V)
+    LE, // LE (LESS OR EQUAL : SIGNED <= : Z = 1 OR N != V)
+    PR, // PR (PREBRANCH SET FLAGS behave like CMP, PR + L behave like TEST) BPR.L    => TEST bits
+    A, // A  (ALWAYS behave like JMP, BA (SP)+ => RTS
 };
 
 // Condition alias
@@ -99,11 +98,231 @@ pub const Instruction = packed union {
 
     pub fn execute(self: Instruction, cpu: *CPU) !void {
         switch (self.bytecode.opcode) {
+            @intFromEnum(Opcode.FREE) => try VOID(cpu, self),
+            @intFromEnum(Opcode.B) => try B(cpu, self),
+            @intFromEnum(Opcode.LD) => try LD(cpu, self),
+            @intFromEnum(Opcode.ST) => try ST(cpu, self),
             @intFromEnum(Opcode.ADD) => try ADD(cpu, self),
             @intFromEnum(Opcode.SUB) => try SUB(cpu, self),
             @intFromEnum(Opcode.MUL) => try MUL(cpu, self),
             @intFromEnum(Opcode.DIV) => try DIV(cpu, self),
+            @intFromEnum(Opcode.AND) => try AND(cpu, self),
+            @intFromEnum(Opcode.OR) => try OR(cpu, self),
+            @intFromEnum(Opcode.XOR) => try XOR(cpu, self),
+            @intFromEnum(Opcode.ROL) => try ROL(cpu, self),
+            @intFromEnum(Opcode.ROR) => try ROR(cpu, self),
+            @intFromEnum(Opcode.LSL) => try LSL(cpu, self),
+            @intFromEnum(Opcode.LSR) => try LSR(cpu, self),
+            @intFromEnum(Opcode.SWI) => try SWI(cpu, self),
         }
+    }
+
+    fn VOID(cpu: *CPU, instruction: Instruction) !void {
+        _ = cpu;
+        _ = instruction;
+        return;
+    }
+
+    fn B(cpu: *CPU, instruction: Instruction) !void {
+        // PC RELATIVE
+        // When bitecode.fl bit is set save PC before jump (Link and Branch). Bxx.L => -(SP)=PC and Branch
+        // Rd store Condition.
+
+        // Accepted syntax.
+        // BNE label        => Instruction.pack(0, .B, .REGISTER_IMM16, 0, Condition.NE, .R0, 0, PC - label);
+        // BMI IMM16        => Instruction.pack(0, .B, .REGISTER_IMM16, 0, Condition.MI, .R0, 0, IMM16);
+
+        // BGT label(Rs)    => Instruction.pack(0, .B, .OFFSET_INDEXED, 0, Condition.GT, .Rs, 0, PC - label;
+        // BGE.L label(Rs)  => Instruction.pack(0, .B, .OFFSET_INDEXED, 0, Condition.GE, .Rs, 1, PC - label;
+
+        // BPR Rs, Rn       => Instruction.pack(0, .B, .OFFSET_INDEXED, 0, Condition.PR, .Rs, 0, (Rn << 12));   => Rs - Rn ; Set flags NZCV discard result.
+        // BPR Rs, IMM16    => Instruction.pack(0, .B, .REGISTER_IMM16, 0, Condition.PR, .Rs, 0, IMM16);        => Rs - IMM16 ; Set flags NZCV discard result.
+
+        // BPR.B Rs, Rn       => Instruction.pack(0, .B, .OFFSET_INDEXED, 0, Condition.PR, .Rs, 1, (Rn << 12));   => Rs & Rn ; Set flags NZCV discard result.
+        // BPR.B Rs, IMM16    => Instruction.pack(0, .B, .REGISTER_IMM16, 0, Condition.PR, .Rs, 1, IMM16);        => Rs & IMM16 ; Set flags NZCV discard result.
+
+        const condition = @as(Condition, @enumFromInt(instruction.bytecode.rd));
+        const rs = instruction.bytecode.rs;
+        const imm = instruction.bytecode.imm16;
+        const is_link = instruction.bytecode.fl == 1;
+
+        // Determine if branch condition is met
+        const condition_met = switch (condition) {
+            .EQ => cpu.registers.SR.getFlag(.Z),
+            .NE => !cpu.registers.SR.getFlag(.Z),
+            .CS => cpu.registers.SR.getFlag(.C),
+            .CC => !cpu.registers.SR.getFlag(.C),
+            .MI => cpu.registers.SR.getFlag(.N),
+            .PL => !cpu.registers.SR.getFlag(.N),
+            .VS => cpu.registers.SR.getFlag(.V),
+            .VC => !cpu.registers.SR.getFlag(.V),
+            .HI => cpu.registers.SR.getFlag(.C) and !cpu.registers.SR.getFlag(.Z),
+            .LS => !cpu.registers.SR.getFlag(.C) or cpu.registers.SR.getFlag(.Z),
+            .GE => cpu.registers.SR.getFlag(.N) == cpu.registers.SR.getFlag(.V),
+            .LT => cpu.registers.SR.getFlag(.N) != cpu.registers.SR.getFlag(.V),
+            .GT => !cpu.registers.SR.getFlag(.Z) and (cpu.registers.SR.getFlag(.N) == cpu.registers.SR.getFlag(.V)),
+            .LE => cpu.registers.SR.getFlag(.Z) or (cpu.registers.SR.getFlag(.N) != cpu.registers.SR.getFlag(.V)),
+            .PR => false, // PR is special case handled below
+            .A => true, // Always branch
+        };
+
+        // Handle PR (PreBranch) condition separately - it performs comparison/test but doesn't branch
+        if (condition == .PR) {
+            // BPR: Compare Rs with Rn or IMM16, set flags but don't branch
+            const first_operand: u16 = cpu.registers.readRegister(rs);
+            const second_operand = if (instruction.bytecode.mode == @intFromEnum(Mode.OFFSET_INDEXED))
+                cpu.registers.readRegister(@truncate((instruction.bytecode.imm16 >> 12) & 0xF))
+            else
+                instruction.bytecode.imm16;
+
+            if (is_link) {
+                // BIT test: Rs & second_operand
+                const result = first_operand & second_operand;
+                cpu.registers.SR.updateFlag(.N, (result & 0x8000) != 0);
+                cpu.registers.SR.updateFlag(.Z, result == 0);
+                cpu.registers.SR.clearFlag(.C);
+                cpu.registers.SR.clearFlag(.V);
+            } else {
+                // Normal compare: Rs - second_operand
+                const result = @subWithOverflow(first_operand, second_operand);
+                cpu.registers.SR.updateFlag(.N, (result[0] & 0x8000) != 0);
+                cpu.registers.SR.updateFlag(.Z, result[0] == 0);
+                cpu.registers.SR.updateFlag(.C, result[1] != 0);
+
+                // Overflow: check if signs differ and result sign differs from first
+                const first_negative = (first_operand & 0x8000) != 0;
+                const second_negative = (second_operand & 0x8000) != 0;
+                const result_negative = (result[0] & 0x8000) != 0;
+                cpu.registers.SR.updateFlag(.V, (first_negative != second_negative) and (first_negative != result_negative));
+            }
+            return;
+        }
+
+        // If condition is not met, don't branch
+        if (!condition_met) {
+            return;
+        }
+
+        // Save PC to stack if link bit is set
+        if (is_link) {
+            cpu.registers.SP -%= 2;
+            cpu.ram.write16(cpu.registers.SP, cpu.registers.PC);
+        }
+
+        // Calculate target address
+        const target_address: u16 = if (instruction.bytecode.mode == @intFromEnum(Mode.REGISTER_IMM16)) blk: {
+            // REGISTER_IMM16: offset is imm16 (sign-extended as PC-relative)
+            const offset = @as(i16, @bitCast(imm));
+            break :blk cpu.registers.PC +% @as(u16, @bitCast(offset));
+        } else blk: {
+            // OFFSET_INDEXED: address is imm16(rs) = base + offset
+            const offset = @as(i16, @bitCast(imm));
+            const base = cpu.registers.readRegister(rs);
+            const computed_offset = @as(u16, @bitCast(offset));
+            break :blk base +% computed_offset;
+        };
+
+        cpu.registers.PC = target_address;
+    }
+
+    fn LD(cpu: *CPU, instruction: Instruction) !void {
+        const rd = instruction.bytecode.rd;
+        const rs = instruction.bytecode.rs;
+        const imm = instruction.bytecode.imm16;
+        const sp_index = @intFromEnum(RegistersName.R14);
+        const pc_index = @intFromEnum(RegistersName.R15);
+
+        // Illegal: LD PC, Rs|IMM16
+        if (rd == pc_index) {
+            cpu.registers.SR.raw = @intFromEnum(Trap.Illegal_instruction);
+            cpu.registers.SR.setFlag(.T);
+            return;
+        }
+
+        if (instruction.bytecode.mode == @intFromEnum(Mode.REGISTER_IMM16)) {
+            // Handle SP special cases first (most common?)
+            if (rd == sp_index) {
+                // Illegal: LD SP, SP
+                if (rs == sp_index) {
+                    cpu.registers.SR.raw = @intFromEnum(Trap.Illegal_instruction);
+                    cpu.registers.SR.setFlag(.T);
+                    return;
+                }
+                // PUSH: LD -(SP), Rs or LD -(SP), IMM16
+                const value = if (imm != 0) imm else cpu.registers.readRegister(rs);
+                cpu.registers.SP -%= 2;
+                cpu.ram.write16(cpu.registers.SP, value);
+                return;
+            }
+
+            // POP: LD Rd, (SP)+
+            if (rs == sp_index) {
+                const value = cpu.ram.read16(cpu.registers.SP);
+                cpu.registers.SP +%= 2;
+                cpu.registers.writeRegister(rd, value);
+                return;
+            }
+
+            // Check for illegal instruction: LD Rd, Rs, IMM16 where all three differ
+            // Only illegal when: rd != rs AND rs != 0 AND imm != 0
+            if (rd != rs and rs != 0 and imm != 0) {
+                cpu.registers.SR.raw = @intFromEnum(Trap.Illegal_instruction);
+                cpu.registers.SR.setFlag(.T);
+                return;
+            }
+
+            // LD Rd, IMM16 (rs == 0, imm != 0)
+            if (rs == 0) {
+                cpu.registers.writeRegister(rd, imm);
+                return;
+            }
+
+            // LD Rd, Rs (imm == 0, rs != 0)
+            const value = cpu.registers.readRegister(rs);
+            cpu.registers.writeRegister(rd, value);
+        } else {
+            // OFFSET_INDEXED: LD Rd, IMM16(Rs)
+            const address = cpu.registers.readRegister(rs) +% imm;
+            const value = cpu.ram.read16(address);
+            cpu.registers.writeRegister(rd, value);
+        }
+    }
+
+    fn ST(cpu: *CPU, instruction: Instruction) !void {
+        const rd = instruction.bytecode.rd;
+        const rs = instruction.bytecode.rs;
+        const imm = instruction.bytecode.imm16;
+        const pc_index = @intFromEnum(RegistersName.R15);
+
+        // REGISTER_IMM16 mode is illegal for ST
+        if (instruction.bytecode.mode == @intFromEnum(Mode.REGISTER_IMM16)) {
+            cpu.registers.SR.raw = @intFromEnum(Trap.Illegal_instruction);
+            cpu.registers.SR.setFlag(.T);
+            return;
+        }
+
+        // Illegal: ST PC, Rs|IMM16 (storing to PC as dest is illegal)
+        if (rd == pc_index) {
+            cpu.registers.SR.raw = @intFromEnum(Trap.Illegal_instruction);
+            cpu.registers.SR.setFlag(.T);
+            return;
+        }
+
+        // OFFSET_INDEXED: ST IMM16(Rd), Rs
+        // [IMM16 + Rd] = Rs
+        const address = cpu.registers.readRegister(rd) +% imm;
+        const value = cpu.registers.readRegister(rs);
+        cpu.ram.write16(address, value);
+    }
+
+    fn SWI(cpu: *CPU, instruction: Instruction) !void {
+        if (instruction.bytecode.mode == @intFromEnum(Mode.OFFSET_INDEXED)) {
+            // SR = Trap ERROR.
+            cpu.registers.SR.raw = @intFromEnum(Trap.Illegal_instruction);
+            cpu.registers.SR.setFlag(.T);
+            return;
+        }
+        return;
     }
 
     fn ADD(cpu: *CPU, instruction: Instruction) !void {
@@ -287,8 +506,8 @@ pub const Instruction = packed union {
             if (instruction.bytecode.rd != 0) {
                 cpu.registers.writeRegister(instruction.bytecode.rd, result_hi);
                 cpu.registers.writeRegister(instruction.bytecode.rs, result_lo);
-                cpu.registers.SR.clearFlag(.X);
             }
+            cpu.registers.SR.clearFlag(.X);
         }
     }
 
@@ -312,12 +531,12 @@ pub const Instruction = packed union {
 
         // Check for division by zero
         if (second_operand == 0) {
-            cpu.registers.SR.flags.T = true; // Set trap flag
+            cpu.registers.SR.raw = @intFromEnum(Trap.Division_by_zero);
+            cpu.registers.SR.setFlag(.T); // Set trap flag
             return;
         }
 
         const quotient: u32 = first_operand / second_operand;
-        const remainder: u16 = first_operand % second_operand;
         const result: u16 = @truncate(quotient);
 
         // Update flags (N, Z, V)
@@ -326,14 +545,14 @@ pub const Instruction = packed union {
         cpu.registers.SR.clearFlag(.C);
         cpu.registers.SR.clearFlag(.V);
 
-        // Write result to Rd (unless Rd is R0, which is always zero)
         if (instruction.bytecode.rd != 0) {
             cpu.registers.writeRegister(instruction.bytecode.rd, result);
             if (cpu.registers.SR.getFlag(.X)) {
+                const remainder: u16 = first_operand % second_operand;
                 cpu.registers.writeRegister(instruction.bytecode.rs, remainder);
                 cpu.registers.SR.clearFlag(.X);
             }
-        }
+        } else if (cpu.registers.SR.getFlag(.X)) cpu.registers.SR.clearFlag(.X);
     }
 
     fn AND(cpu: *CPU, instruction: Instruction) !void {
@@ -1343,7 +1562,8 @@ test "MUL - Illegal mode" {
     // MUL doesn't support OFFSET_INDEXED mode
     const mul_illegal = Instruction.pack(0, .MUL, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
     try Instruction.MUL(&cpu, mul_illegal);
-    try expect(cpu.registers.SR.flags.T == true); // T flag set on illegal instruction
+    try expect(cpu.registers.SR.flags.T == true);
+    try expect(cpu.registers.SR.raw & 0x7FFF == @intFromEnum(Trap.Illegal_instruction));
 }
 
 test "MULX - (32-bit result)" {
@@ -1522,8 +1742,8 @@ test "DIV - Division by zero" {
     cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0000);
     const div_by_zero = Instruction.pack(0, .DIV, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
     try Instruction.DIV(&cpu, div_by_zero);
-    try expect(cpu.registers.SR.flags.T == true); // Trap flag
-
+    try expect(cpu.registers.SR.flags.T == true);
+    try expect(cpu.registers.SR.raw & 0x7FFF == @intFromEnum(Trap.Division_by_zero));
 }
 
 test "DIV - R0 destination (void write)" {
@@ -1671,7 +1891,8 @@ test "DIV - Illegal mode" {
     // DIV doesn't support OFFSET_INDEXED mode
     const div_illegal = Instruction.pack(0, .DIV, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
     try Instruction.DIV(&cpu, div_illegal);
-    try expect(cpu.registers.SR.flags.T == true); // T flag set on illegal instruction
+    try expect(cpu.registers.SR.flags.T == true);
+    try expect(cpu.registers.SR.raw & 0x7FFF == @intFromEnum(Trap.Illegal_instruction));
 }
 
 test "AND - Basic operations" {
@@ -1757,6 +1978,7 @@ test "AND - R0 destination and illegal mode" {
     const and_illegal = Instruction.pack(0, .AND, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
     try Instruction.AND(&cpu, and_illegal);
     try expect(cpu.registers.SR.flags.T == true);
+    try expect(cpu.registers.SR.raw & 0x7FFF == @intFromEnum(Trap.Illegal_instruction));
 }
 
 test "OR - Basic operations" {
@@ -1842,6 +2064,7 @@ test "OR - R0 destination and illegal mode" {
     const or_illegal = Instruction.pack(0, .OR, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
     try Instruction.OR(&cpu, or_illegal);
     try expect(cpu.registers.SR.flags.T == true);
+    try expect(cpu.registers.SR.raw & 0x7FFF == @intFromEnum(Trap.Illegal_instruction));
 }
 
 test "XOR - Basic operations" {
@@ -1927,6 +2150,7 @@ test "XOR - R0 destination and illegal mode" {
     const xor_illegal = Instruction.pack(0, .XOR, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0010);
     try Instruction.XOR(&cpu, xor_illegal);
     try expect(cpu.registers.SR.flags.T == true);
+    try expect(cpu.registers.SR.raw & 0x7FFF == @intFromEnum(Trap.Illegal_instruction));
 }
 
 test "ROL - Basic operations" {
@@ -2028,6 +2252,7 @@ test "ROL - R0 as destination and Illegal Mode" {
     const rol_illegal = Instruction.pack(0, .ROL, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0);
     try Instruction.ROL(&cpu, rol_illegal);
     try expect(cpu.registers.SR.flags.T == true);
+    try expect(cpu.registers.SR.raw & 0x7FFF == @intFromEnum(Trap.Illegal_instruction));
 }
 
 test "ROR - Basic operations" {
@@ -2129,6 +2354,7 @@ test "ROR - R0 as destination and Illegal Mode" {
     const ror_illegal = Instruction.pack(0, .ROR, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0);
     try Instruction.ROR(&cpu, ror_illegal);
     try expect(cpu.registers.SR.flags.T == true);
+    try expect(cpu.registers.SR.raw & 0x7FFF == @intFromEnum(Trap.Illegal_instruction));
 }
 
 test "LSL - Basic operations" {
@@ -2231,6 +2457,7 @@ test "LSL - R0 as destination and Illegal Mode" {
     const lsl_illegal = Instruction.pack(0, .LSL, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0);
     try Instruction.LSL(&cpu, lsl_illegal);
     try expect(cpu.registers.SR.flags.T == true);
+    try expect(cpu.registers.SR.raw & 0x7FFF == @intFromEnum(Trap.Illegal_instruction));
 }
 
 test "LSR - Basic operations" {
@@ -2332,6 +2559,7 @@ test "LSR - R0 as destination and Illegal Mode" {
     const lsr_illegal = Instruction.pack(0, .LSR, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0);
     try Instruction.LSR(&cpu, lsr_illegal);
     try expect(cpu.registers.SR.flags.T == true);
+    try expect(cpu.registers.SR.raw & 0x7FFF == @intFromEnum(Trap.Illegal_instruction));
 }
 
 test "ASR - Basic operations" {
@@ -2445,4 +2673,814 @@ test "ASR - R0 as destination and Illegal Mode" {
     const asr_illegal = Instruction.pack(0, .LSR, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0);
     try Instruction.LSR(&cpu, asr_illegal);
     try expect(cpu.registers.SR.flags.T == true);
+    try expect(cpu.registers.SR.raw & 0x7FFF == @intFromEnum(Trap.Illegal_instruction));
+}
+
+test "LD - Basic operations" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // LD R2, 0
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 2);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 4);
+    const ld_0 = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R2, .R0, 0, 0x0000);
+    try Instruction.LD(&cpu, ld_0);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0);
+
+    // LD R2, R0
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 2);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 4);
+    const ld_R0 = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R2, .R0, 0, 0x0000);
+    try Instruction.LD(&cpu, ld_R0);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0);
+
+    // LD R2, R1
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 2);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 4);
+    const ld_instruction = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0000);
+    try Instruction.LD(&cpu, ld_instruction);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 2);
+
+    // LD R2, 0xBEEF
+    cpu.reset(false);
+    const ld_beef = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R2, .R0, 0, 0xBEEF);
+    try Instruction.LD(&cpu, ld_beef);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0xBEEF);
+
+    // LD -(SP), R1
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 2);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 4);
+    const ld_push = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R14, .R1, 0, 0x0000);
+    try Instruction.LD(&cpu, ld_push);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R14)) == 0xFFFC);
+    try expect(cpu.ram.read16(cpu.registers.readRegister(@intFromEnum(RegistersName.R14))) == 0x0002);
+
+    // LD R2, (SP)+
+    const ld_pop = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R2, .R14, 0, 0x0000);
+    try Instruction.LD(&cpu, ld_pop);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R14)) == 0xFFFE);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x0002);
+
+    // LD -(SP), 0xDEAD
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 2);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 4);
+    const ld_push_dead = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R14, .R0, 0, 0xDEAD);
+    try Instruction.LD(&cpu, ld_push_dead);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R14)) == 0xFFFC);
+    try expect(cpu.ram.read16(cpu.registers.readRegister(@intFromEnum(RegistersName.R14))) == 0xDEAD);
+
+    // LD R2, (SP)+
+    const ld_pop_dead = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R2, .R14, 0, 0x0000);
+    try Instruction.LD(&cpu, ld_pop_dead);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R14)) == 0xFFFE);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0xDEAD);
+
+    // LD R2, 2(R1)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 2);
+    cpu.ram.write16(0x0002, 0xDEAD);
+    cpu.ram.write16(0x0004, 0xBEEF);
+    const ld_offset = Instruction.pack(0, .LD, .OFFSET_INDEXED, 0, .R2, .R1, 0, 0x0002);
+    try Instruction.LD(&cpu, ld_offset);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0xBEEF);
+}
+
+test "LD - Edge cases and illegal operations" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // Edge Case: LD PC, * (should be illegal - loading into PC)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xDEAD);
+    const ld_to_pc = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R15, .R1, 0, 0x0000);
+    try Instruction.LD(&cpu, ld_to_pc);
+    try expect(cpu.registers.SR.getFlag(.T) == true);
+    try expect(cpu.registers.SR.raw & 0x7FFF == @intFromEnum(Trap.Illegal_instruction));
+
+    // Edge Case: LD PC, 0xBEEF (immediate to PC - should be illegal)
+    cpu.reset(false);
+    const ld_imm_to_pc = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R15, .R0, 0, 0xBEEF);
+    try Instruction.LD(&cpu, ld_imm_to_pc);
+    try expect(cpu.registers.SR.getFlag(.T) == true);
+    try expect(cpu.registers.SR.raw & 0x7FFF == @intFromEnum(Trap.Illegal_instruction));
+
+    // Edge Case: LD SP, SP (should be illegal - SP to SP)
+    cpu.reset(false);
+    const original_sp = cpu.registers.readRegister(@intFromEnum(RegistersName.R14));
+    const ld_sp_sp = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R14, .R14, 0, 0x0000);
+    try Instruction.LD(&cpu, ld_sp_sp);
+    try expect(cpu.registers.SR.getFlag(.T) == true);
+    try expect(cpu.registers.SR.raw & 0x7FFF == @intFromEnum(Trap.Illegal_instruction));
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R14)) == original_sp); // SP unchanged
+
+    // Edge Case: LD R2, R1, IMM16 (all three different - should be illegal)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x1111);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x2222);
+    const ld_three_operands = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R2, .R1, 0, 0x0042);
+    try Instruction.LD(&cpu, ld_three_operands);
+    try expect(cpu.registers.SR.getFlag(.T) == true);
+    try expect(cpu.registers.SR.raw & 0x7FFF == @intFromEnum(Trap.Illegal_instruction));
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0x2222); // R2 unchanged
+
+    // Edge Case: Stack overflow - multiple pushes
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xAAAA);
+    const initial_sp = cpu.registers.SP;
+
+    // Push 3 times
+    for (0..3) |_| {
+        const ld_push = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R14, .R1, 0, 0x0000);
+        try Instruction.LD(&cpu, ld_push);
+    }
+
+    try expect(cpu.registers.SP == initial_sp -% 6); // SP decreased by 6 (3 * 2 bytes)
+    try expect(cpu.ram.read16(cpu.registers.SP) == 0xAAAA);
+    try expect(cpu.ram.read16(cpu.registers.SP +% 2) == 0xAAAA);
+    try expect(cpu.ram.read16(cpu.registers.SP +% 4) == 0xAAAA);
+
+    // Edge Case: Stack underflow - multiple pops
+    // Pop 3 times back
+    for (0..3) |_| {
+        const ld_pop = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R2, .R14, 0, 0x0000);
+        try Instruction.LD(&cpu, ld_pop);
+    }
+
+    try expect(cpu.registers.SP == initial_sp); // SP back to original
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0xAAAA);
+
+    // Edge Case: LD with maximum immediate value
+    cpu.reset(false);
+    const ld_max_imm = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R3, .R0, 0, 0xFFFF);
+    try Instruction.LD(&cpu, ld_max_imm);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R3)) == 0xFFFF);
+
+    // Edge Case: OFFSET_INDEXED with zero offset
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x1000);
+    cpu.ram.write16(0x1000, 0xCAFE);
+    const ld_zero_offset = Instruction.pack(0, .LD, .OFFSET_INDEXED, 0, .R2, .R1, 0, 0x0000);
+    try Instruction.LD(&cpu, ld_zero_offset);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0xCAFE);
+
+    // Edge Case: OFFSET_INDEXED with maximum offset causing address wraparound
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0010);
+    cpu.ram.write16(0x000F, 0xBABE); // Wraparound: 0x0010 + 0xFFFF = 0x000F
+    const ld_max_offset = Instruction.pack(0, .LD, .OFFSET_INDEXED, 0, .R2, .R1, 0, 0xFFFF);
+    try Instruction.LD(&cpu, ld_max_offset);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R2)) == 0xBABE);
+
+    // Edge Case: OFFSET_INDEXED loading into same register as base
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x2000);
+    cpu.ram.write16(0x2004, 0xFACE);
+    const ld_same_reg = Instruction.pack(0, .LD, .OFFSET_INDEXED, 0, .R1, .R1, 0, 0x0004);
+    try Instruction.LD(&cpu, ld_same_reg);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R1)) == 0xFACE);
+
+    // Edge Case: Push immediate zero
+    cpu.reset(false);
+    const sp_before = cpu.registers.SP;
+    const ld_push_zero = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R14, .R0, 0, 0x0000);
+    try Instruction.LD(&cpu, ld_push_zero);
+    try expect(cpu.registers.SP == sp_before -% 2);
+    try expect(cpu.ram.read16(cpu.registers.SP) == 0x0000);
+
+    // Edge Case: LD R0, R1
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x5555);
+    const ld_to_r0 = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R0, .R1, 0, 0x0000);
+    try Instruction.LD(&cpu, ld_to_r0);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R0)) == 0x0000);
+
+    // Edge Case: LD Rd, Rd (self-assignment with register mode)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0x7777);
+    const ld_self = Instruction.pack(0, .LD, .REGISTER_IMM16, 0, .R3, .R3, 0, 0x0000);
+    try Instruction.LD(&cpu, ld_self);
+    try expect(cpu.registers.readRegister(@intFromEnum(RegistersName.R3)) == 0x7777); // Should remain unchanged
+}
+
+test "ST - Basic operations" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // ST 0(R1), R2 - [R1 + 0] ← R2
+    // rd=R1 (destination address base), rs=R2 (source value)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x1000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0xDEAD);
+    const st_basic = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.ST(&cpu, st_basic);
+    try expect(cpu.ram.read16(0x1000) == 0xDEAD);
+
+    // ST 4(R1), R3 - [R1 + 4] ← R3
+    // rd=R1 (destination address base), rs=R3 (source value)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x2000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0xBEEF);
+    const st_offset = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R1, .R3, 0, 0x0004);
+    try Instruction.ST(&cpu, st_offset);
+    try expect(cpu.ram.read16(0x2004) == 0xBEEF);
+
+    // ST 0x100(R0), R4 - [R0 + 0x100] ← R4 (R0 is always 0)
+    // rd=R0 (destination address base), rs=R4 (source value)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R4), 0xCAFE);
+    const st_r0_base = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R0, .R4, 0, 0x0100);
+    try Instruction.ST(&cpu, st_r0_base);
+    try expect(cpu.ram.read16(0x0100) == 0xCAFE);
+
+    // ST 2(R5), R5 - [R5 + 2] ← R5 (using same register for address and value)
+    // rd=R5 (destination address base), rs=R5 (source value)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R5), 0x3000);
+    const st_same_reg = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R5, .R5, 0, 0x0002);
+    try Instruction.ST(&cpu, st_same_reg);
+    try expect(cpu.ram.read16(0x3002) == 0x3000);
+
+    // ST 0(SP), R1 - [SP + 0] ← R1
+    // rd=SP (destination address base), rs=R1 (source value)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x5555);
+    const sp_addr = cpu.registers.SP;
+    const st_sp_base = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R14, .R1, 0, 0x0000);
+    try Instruction.ST(&cpu, st_sp_base);
+    try expect(cpu.ram.read16(sp_addr) == 0x5555);
+
+    // Multiple stores to adjacent addresses
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x4000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0xAAAA);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0xBBBB);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R4), 0xCCCC);
+
+    const st1 = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0000);
+    const st2 = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R1, .R3, 0, 0x0002);
+    const st3 = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R1, .R4, 0, 0x0004);
+
+    try Instruction.ST(&cpu, st1);
+    try Instruction.ST(&cpu, st2);
+    try Instruction.ST(&cpu, st3);
+
+    try expect(cpu.ram.read16(0x4000) == 0xAAAA);
+    try expect(cpu.ram.read16(0x4002) == 0xBBBB);
+    try expect(cpu.ram.read16(0x4004) == 0xCCCC);
+}
+
+test "ST - Edge cases and illegal operations" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // Illegal: ST in REGISTER_IMM16 mode (only OFFSET_INDEXED is valid)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x1111);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x2222);
+    const st_illegal_mode = Instruction.pack(0, .ST, .REGISTER_IMM16, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.ST(&cpu, st_illegal_mode);
+    try expect(cpu.registers.SR.getFlag(.T) == true);
+    const trap_code1 = cpu.registers.SR.raw & 0x7FFF;
+    try expect(trap_code1 == @intFromEnum(Trap.Illegal_instruction));
+
+    // Illegal: ST PC, Rs|IMM16 (storing to PC register)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x5000);
+    const st_to_pc = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R15, .R1, 0, 0x0000);
+    try Instruction.ST(&cpu, st_to_pc);
+    try expect(cpu.registers.SR.getFlag(.T) == true);
+    const trap_code2 = cpu.registers.SR.raw & 0x7FFF;
+    try expect(trap_code2 == @intFromEnum(Trap.Illegal_instruction));
+
+    // Illegal: ST with immediate in REGISTER_IMM16 mode
+    cpu.reset(false);
+    const st_illegal_imm = Instruction.pack(0, .ST, .REGISTER_IMM16, 0, .R2, .R0, 0, 0xDEAD);
+    try Instruction.ST(&cpu, st_illegal_imm);
+    try expect(cpu.registers.SR.getFlag(.T) == true);
+    const trap_code3 = cpu.registers.SR.raw & 0x7FFF;
+    try expect(trap_code3 == @intFromEnum(Trap.Illegal_instruction));
+
+    // Edge Case: Store with maximum offset causing address wraparound
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0010);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0xFACE);
+    const st_max_offset = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0xFFFF);
+    try Instruction.ST(&cpu, st_max_offset);
+    // 0x0010 + 0xFFFF wraps to 0x000F
+    try expect(cpu.ram.read16(0x000F) == 0xFACE);
+
+    // Edge Case: Store zero value
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x6000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R0), 0x0000);
+    const st_zero = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R1, .R0, 0, 0x0000);
+    try Instruction.ST(&cpu, st_zero);
+    try expect(cpu.ram.read16(0x6000) == 0x0000);
+
+    // Edge Case: Store maximum value (0xFFFF)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x7000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0xFFFF);
+    const st_max_val = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.ST(&cpu, st_max_val);
+    try expect(cpu.ram.read16(0x7000) == 0xFFFF);
+
+    // Edge Case: Overwrite existing memory value
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x8000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x1111);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0x2222);
+
+    // First store
+    const st_first = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x0000);
+    try Instruction.ST(&cpu, st_first);
+    try expect(cpu.ram.read16(0x8000) == 0x1111);
+
+    // Overwrite with second store
+    const st_second = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R1, .R3, 0, 0x0000);
+    try Instruction.ST(&cpu, st_second);
+    try expect(cpu.ram.read16(0x8000) == 0x2222);
+
+    // Edge Case: Store to address 0x0000
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x7777);
+    const st_addr_zero = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R0, .R1, 0, 0x0000);
+    try Instruction.ST(&cpu, st_addr_zero);
+    try expect(cpu.ram.read16(0x0000) == 0x7777);
+
+    // Edge Case: Store to maximum address (near 0xFFFF)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xFFF0);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x9999);
+    const st_high_addr = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0x000E);
+    try Instruction.ST(&cpu, st_high_addr);
+    try expect(cpu.ram.read16(0xFFFE) == 0x9999);
+
+    // Edge Case: Store using PC as base address
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x3333);
+    const st_pc_base = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R15, .R1, 0, 0x0010);
+    try Instruction.ST(&cpu, st_pc_base);
+    try expect(cpu.registers.SR.getFlag(.T) == true);
+    try expect(cpu.registers.SR.raw & 0x7FFF == @intFromEnum(Trap.Illegal_instruction));
+
+    // Edge Case: Negative offset (using two's complement)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x9000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x4444);
+    // 0xFFFE is -2 in two's complement
+    const st_neg_offset = Instruction.pack(0, .ST, .OFFSET_INDEXED, 0, .R1, .R2, 0, 0xFFFE);
+    try Instruction.ST(&cpu, st_neg_offset);
+    // 0x9000 + 0xFFFE = 0x8FFE (wrapping arithmetic)
+    try expect(cpu.ram.read16(0x8FFE) == 0x4444);
+}
+
+test "BPR - Compare with register (OFFSET_INDEXED, fl=0)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // BPR R1, R2 where R1 > R2 (positive result)
+    // Syntax: BPR Rs, Rn => Instruction.pack(0, .B, .OFFSET_INDEXED, 0, Condition.PR, .Rs, 0, (Rn << 12))
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x5000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x3000);
+    const bpr_greater = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R1, 0, (@as(u16, 2) << 12));
+    try Instruction.B(&cpu, bpr_greater);
+    // R1 - R2 = 0x5000 - 0x3000 = 0x2000 (positive)
+    try expect(cpu.registers.SR.getFlag(.N) == false); // Negative flag clear
+    try expect(cpu.registers.SR.getFlag(.Z) == false); // Zero flag clear
+    try expect(cpu.registers.SR.getFlag(.C) == false); // Carry flag clear (no borrow)
+    try expect(cpu.registers.SR.getFlag(.V) == false); // Overflow flag clear
+
+    // BPR R3, R4 where R3 < R4 (negative result, borrow)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0x2000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R4), 0x5000);
+    const bpr_less = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R3, 0, (@as(u16, 4) << 12));
+    try Instruction.B(&cpu, bpr_less);
+    // R3 - R4 = 0x2000 - 0x5000 = 0xD000 (negative, borrow)
+    try expect(cpu.registers.SR.getFlag(.N) == true); // Negative flag set
+    try expect(cpu.registers.SR.getFlag(.Z) == false); // Zero flag clear
+    try expect(cpu.registers.SR.getFlag(.C) == true); // Carry flag set (borrow occurred)
+    try expect(cpu.registers.SR.getFlag(.V) == false); // Overflow flag clear
+
+    // BPR R5, R6 where R5 == R6 (zero result)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R5), 0x4000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R6), 0x4000);
+    const bpr_equal = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R5, 0, (@as(u16, 6) << 12));
+    try Instruction.B(&cpu, bpr_equal);
+    // R5 - R6 = 0x4000 - 0x4000 = 0x0000 (zero)
+    try expect(cpu.registers.SR.getFlag(.N) == false);
+    try expect(cpu.registers.SR.getFlag(.Z) == true); // Zero flag set
+    try expect(cpu.registers.SR.getFlag(.C) == false);
+    try expect(cpu.registers.SR.getFlag(.V) == false);
+}
+
+test "BPR - Compare with immediate (REGISTER_IMM16, fl=0)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // BPR R1, 0x2000 where R1 > IMM16
+    // Syntax: BPR Rs, IMM16 => Instruction.pack(0, .B, .REGISTER_IMM16, 0, Condition.PR, .Rs, 0, IMM16)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x8000);
+    const bpr_imm_greater = Instruction.pack(0, .B, .REGISTER_IMM16, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R1, 0, 0x2000);
+    try Instruction.B(&cpu, bpr_imm_greater);
+    // R1 - 0x2000 = 0x8000 - 0x2000 = 0x6000 (positive)
+    try expect(cpu.registers.SR.getFlag(.N) == false);
+    try expect(cpu.registers.SR.getFlag(.Z) == false);
+    try expect(cpu.registers.SR.getFlag(.C) == false);
+    try expect(cpu.registers.SR.getFlag(.V) == true);
+
+    // BPR R2, 0x1000 where R2 < IMM16
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0500);
+    const bpr_imm_less = Instruction.pack(0, .B, .REGISTER_IMM16, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R2, 0, 0x1000);
+    try Instruction.B(&cpu, bpr_imm_less);
+    // R2 - 0x1000 = 0x0500 - 0x1000 = 0xF500 (negative, borrow)
+    try expect(cpu.registers.SR.getFlag(.N) == true);
+    try expect(cpu.registers.SR.getFlag(.Z) == false);
+    try expect(cpu.registers.SR.getFlag(.C) == true);
+
+    // BPR R3, 0x4000 where R3 == IMM16
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0x4000);
+    const bpr_imm_equal = Instruction.pack(0, .B, .REGISTER_IMM16, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R3, 0, 0x4000);
+    try Instruction.B(&cpu, bpr_imm_equal);
+    // R3 - 0x4000 = 0x0000 (zero)
+    try expect(cpu.registers.SR.getFlag(.Z) == true);
+    try expect(cpu.registers.SR.getFlag(.N) == false);
+    try expect(cpu.registers.SR.getFlag(.C) == false);
+}
+
+test "BPR - Overflow detection (fl=0)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // Overflow: positive - negative = negative (should overflow)
+    // 0x7FFF (max positive) - 0x8000 (max negative) = overflow
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x7FFF);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x8000);
+    const bpr_overflow1 = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R1, 0, (@as(u16, 2) << 12));
+    try Instruction.B(&cpu, bpr_overflow1);
+    // 0x7FFF - 0x8000 = 0xFFFF (result appears negative but should be positive - overflow)
+    try expect(cpu.registers.SR.getFlag(.V) == true); // Overflow flag set
+    try expect(cpu.registers.SR.getFlag(.N) == true); // Result is negative
+    try expect(cpu.registers.SR.getFlag(.C) == true); // Borrow occurred
+
+    // Overflow: negative - positive = positive (should overflow)
+    // 0x8000 (max negative) - 0x7FFF (max positive) = overflow
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0x8000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R4), 0x7FFF);
+    const bpr_overflow2 = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R3, 0, (@as(u16, 4) << 12));
+    try Instruction.B(&cpu, bpr_overflow2);
+    // 0x8000 - 0x7FFF = 0x0001 (result appears positive but should be negative - overflow)
+    try expect(cpu.registers.SR.getFlag(.V) == true); // Overflow flag set
+    try expect(cpu.registers.SR.getFlag(.N) == false); // Result is positive
+    try expect(cpu.registers.SR.getFlag(.C) == false); // No borrow
+
+    // No overflow: same signs (both positive)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R5), 0x5000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R6), 0x4000);
+    const bpr_no_overflow1 = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R5, 0, (@as(u16, 6) << 12));
+    try Instruction.B(&cpu, bpr_no_overflow1);
+    // 0x5000 - 0x4000 = 0x1000 (no overflow)
+    try expect(cpu.registers.SR.getFlag(.V) == false);
+
+    // No overflow: same signs (both negative)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R7), 0x9000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R8), 0xA000);
+    const bpr_no_overflow2 = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R7, 0, (@as(u16, 8) << 12));
+    try Instruction.B(&cpu, bpr_no_overflow2);
+    // 0x9000 - 0xA000 = 0xF000 (both negative, no overflow)
+    try expect(cpu.registers.SR.getFlag(.V) == false);
+}
+
+test "BPR - Bit test with register (OFFSET_INDEXED, fl=1)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // BPR.B R1, R2 with complementary patterns (result = 0)
+    // Syntax: BPR.B Rs, Rn => Instruction.pack(0, .B, .OFFSET_INDEXED, 0, Condition.PR, .Rs, 1, (Rn << 12))
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0b1010101010101010);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0b0101010101010101);
+    const bpr_bit_zero = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R1, 1, (@as(u16, 2) << 12));
+    try Instruction.B(&cpu, bpr_bit_zero);
+    // 0xAAAA & 0x5555 = 0x0000 (zero)
+    try expect(cpu.registers.SR.getFlag(.Z) == true);
+    try expect(cpu.registers.SR.getFlag(.N) == false);
+    try expect(cpu.registers.SR.getFlag(.C) == false);
+    try expect(cpu.registers.SR.getFlag(.V) == false);
+
+    // BPR.B R3, R4 with high bit set in result
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0xF0F0);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R4), 0x80FF);
+    const bpr_bit_negative = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R3, 1, (@as(u16, 4) << 12));
+    try Instruction.B(&cpu, bpr_bit_negative);
+    // 0xF0F0 & 0x80FF = 0x80F0 (high bit set, negative)
+    try expect(cpu.registers.SR.getFlag(.Z) == false);
+    try expect(cpu.registers.SR.getFlag(.N) == true); // Bit 15 is set
+    try expect(cpu.registers.SR.getFlag(.C) == false);
+    try expect(cpu.registers.SR.getFlag(.V) == false);
+
+    // BPR.B R5, R6 all bits set
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R5), 0xFFFF);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R6), 0xFFFF);
+    const bpr_bit_allset = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R5, 1, (@as(u16, 6) << 12));
+    try Instruction.B(&cpu, bpr_bit_allset);
+    // 0xFFFF & 0xFFFF = 0xFFFF (all bits set, high bit set = negative)
+    try expect(cpu.registers.SR.getFlag(.Z) == false);
+    try expect(cpu.registers.SR.getFlag(.N) == true);
+    try expect(cpu.registers.SR.getFlag(.C) == false);
+    try expect(cpu.registers.SR.getFlag(.V) == false);
+
+    // BPR.B R7, R8 testing single bit
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R7), 0x0007);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R8), 0x0001);
+    const bpr_bit_single = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R7, 1, (@as(u16, 8) << 12));
+    try Instruction.B(&cpu, bpr_bit_single);
+    // 0x0007 & 0x0001 = 0x0001 (single bit, positive)
+    try expect(cpu.registers.SR.getFlag(.Z) == false);
+    try expect(cpu.registers.SR.getFlag(.N) == false);
+}
+
+test "BPR - Bit test with immediate (REGISTER_IMM16, fl=1)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // BPR.B R1, 0x00FF - mask low byte
+    // Syntax: BPR.B Rs, IMM16 => Instruction.pack(0, .B, .REGISTER_IMM16, 0, Condition.PR, .Rs, 1, IMM16)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0xFF00);
+    const bpr_bit_imm1 = Instruction.pack(0, .B, .REGISTER_IMM16, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R1, 1, 0x00FF);
+    try Instruction.B(&cpu, bpr_bit_imm1);
+    // 0xFF00 & 0x00FF = 0x0000 (zero)
+    try expect(cpu.registers.SR.getFlag(.Z) == true);
+    try expect(cpu.registers.SR.getFlag(.N) == false);
+    try expect(cpu.registers.SR.getFlag(.C) == false);
+    try expect(cpu.registers.SR.getFlag(.V) == false);
+
+    // BPR.B R2, 0x8001 - test high and low bits
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0xFFFF);
+    const bpr_bit_imm2 = Instruction.pack(0, .B, .REGISTER_IMM16, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R2, 1, 0x8001);
+    try Instruction.B(&cpu, bpr_bit_imm2);
+    // 0xFFFF & 0x8001 = 0x8001 (high bit set)
+    try expect(cpu.registers.SR.getFlag(.Z) == false);
+    try expect(cpu.registers.SR.getFlag(.N) == true);
+
+    // BPR.B R3, 0x0001 - test single low bit
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0x0003);
+    const bpr_bit_imm3 = Instruction.pack(0, .B, .REGISTER_IMM16, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R3, 1, 0x0001);
+    try Instruction.B(&cpu, bpr_bit_imm3);
+    // 0x0003 & 0x0001 = 0x0001 (non-zero, high bit clear)
+    try expect(cpu.registers.SR.getFlag(.Z) == false);
+    try expect(cpu.registers.SR.getFlag(.N) == false);
+
+    // BPR.B R4, 0x7FFF - test all bits except high bit
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R4), 0x5555);
+    const bpr_bit_imm4 = Instruction.pack(0, .B, .REGISTER_IMM16, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R4, 1, 0x7FFF);
+    try Instruction.B(&cpu, bpr_bit_imm4);
+    // 0x5555 & 0x7FFF = 0x5555 (positive)
+    try expect(cpu.registers.SR.getFlag(.N) == false);
+    try expect(cpu.registers.SR.getFlag(.Z) == false);
+}
+
+test "BPR - Edge cases with zero" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // Compare 0 - 0 (fl=0)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x0000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x0000);
+    const bpr_zero_compare = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R1, 0, (@as(u16, 2) << 12));
+    try Instruction.B(&cpu, bpr_zero_compare);
+    // 0x0000 - 0x0000 = 0x0000
+    try expect(cpu.registers.SR.getFlag(.Z) == true);
+    try expect(cpu.registers.SR.getFlag(.N) == false);
+    try expect(cpu.registers.SR.getFlag(.C) == false);
+    try expect(cpu.registers.SR.getFlag(.V) == false);
+
+    // Bit test 0 & IMM16 (fl=1)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0x0000);
+    const bpr_zero_bit = Instruction.pack(0, .B, .REGISTER_IMM16, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R3, 1, 0xFFFF);
+    try Instruction.B(&cpu, bpr_zero_bit);
+    // 0x0000 & 0xFFFF = 0x0000
+    try expect(cpu.registers.SR.getFlag(.Z) == true);
+    try expect(cpu.registers.SR.getFlag(.N) == false);
+
+    // Compare 0 - FFFF (fl=0)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R4), 0x0000);
+    const bpr_zero_sub_max = Instruction.pack(0, .B, .REGISTER_IMM16, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R4, 0, 0xFFFF);
+    try Instruction.B(&cpu, bpr_zero_sub_max);
+    // 0x0000 - 0xFFFF = 0x0001 (with borrow)
+    try expect(cpu.registers.SR.getFlag(.C) == true); // Borrow occurred
+    try expect(cpu.registers.SR.getFlag(.Z) == false);
+
+    // Compare using R0 (always 0)
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R5), 0x1234);
+    const bpr_r0 = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R0, 0, (@as(u16, 5) << 12));
+    try Instruction.B(&cpu, bpr_r0);
+    // 0x0000 - 0x1234 = negative (borrow)
+    try expect(cpu.registers.SR.getFlag(.C) == true);
+    try expect(cpu.registers.SR.getFlag(.N) == true);
+}
+
+test "BPR - PC preservation (no branch)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // BPR should NOT modify PC (it's a comparison only)
+    cpu.reset(false);
+    cpu.registers.PC = 0x1000;
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x5000);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x3000);
+    const initial_pc = cpu.registers.PC;
+    const bpr_no_branch = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R1, 0, (@as(u16, 2) << 12));
+    try Instruction.B(&cpu, bpr_no_branch);
+    try expect(cpu.registers.PC == initial_pc); // PC unchanged
+
+    // BPR.B should also NOT modify PC
+    cpu.reset(false);
+    cpu.registers.PC = 0x2000;
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0xAAAA);
+    const initial_pc2 = cpu.registers.PC;
+    const bpr_bit_no_branch = Instruction.pack(0, .B, .REGISTER_IMM16, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R3, 1, 0x5555);
+    try Instruction.B(&cpu, bpr_bit_no_branch);
+    try expect(cpu.registers.PC == initial_pc2); // PC unchanged
+}
+
+test "BPR - Register encoding in imm16" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    // Test all 16 registers can be encoded in bits 12-15
+    var i: u4 = 2;
+    while (i < 15) : (i += 1) {
+        cpu.reset(false);
+        cpu.registers.writeRegister(@intFromEnum(RegistersName.R1), 0x1000);
+        cpu.registers.writeRegister(i, 0x0100);
+        const bpr_reg = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.PR))), .R1, 0, (@as(u16, i) << 12));
+        try Instruction.B(&cpu, bpr_reg);
+        // R1 - Ri; flags should be set
+        // 0x1000 - 0x0100 = 0x0F00 (positive, no flags set except maybe N based on result)
+        try expect(cpu.registers.SR.getFlag(.C) == false);
+        try expect(cpu.registers.SR.getFlag(.Z) == false);
+    }
+}
+
+test "B - condition evaluation (PC relative)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    const cases = [_]struct {
+        cond: Condition,
+        flags: struct { N: bool, Z: bool, C: bool, V: bool },
+        expect_taken: bool,
+    }{
+        .{ .cond = .EQ, .flags = .{ .N = false, .Z = true, .C = false, .V = false }, .expect_taken = true },
+        .{ .cond = .EQ, .flags = .{ .N = false, .Z = false, .C = false, .V = false }, .expect_taken = false },
+        .{ .cond = .NE, .flags = .{ .N = false, .Z = false, .C = false, .V = false }, .expect_taken = true },
+        .{ .cond = .CS, .flags = .{ .N = false, .Z = false, .C = true, .V = false }, .expect_taken = true },
+        .{ .cond = .CC, .flags = .{ .N = false, .Z = false, .C = false, .V = false }, .expect_taken = true },
+        .{ .cond = .MI, .flags = .{ .N = true, .Z = false, .C = false, .V = false }, .expect_taken = true },
+        .{ .cond = .PL, .flags = .{ .N = false, .Z = false, .C = false, .V = false }, .expect_taken = true },
+        .{ .cond = .VS, .flags = .{ .N = false, .Z = false, .C = false, .V = true }, .expect_taken = true },
+        .{ .cond = .VC, .flags = .{ .N = false, .Z = false, .C = false, .V = false }, .expect_taken = true },
+        .{ .cond = .HI, .flags = .{ .N = false, .Z = false, .C = true, .V = false }, .expect_taken = true },
+        .{ .cond = .HI, .flags = .{ .N = false, .Z = true, .C = true, .V = false }, .expect_taken = false },
+        .{ .cond = .LS, .flags = .{ .N = false, .Z = false, .C = false, .V = false }, .expect_taken = true },
+        .{ .cond = .GE, .flags = .{ .N = false, .Z = false, .C = false, .V = false }, .expect_taken = true },
+        .{ .cond = .LT, .flags = .{ .N = true, .Z = false, .C = false, .V = false }, .expect_taken = true },
+        .{ .cond = .GT, .flags = .{ .N = false, .Z = false, .C = false, .V = false }, .expect_taken = true },
+        .{ .cond = .GT, .flags = .{ .N = false, .Z = true, .C = false, .V = false }, .expect_taken = false },
+        .{ .cond = .LE, .flags = .{ .N = false, .Z = true, .C = false, .V = false }, .expect_taken = true },
+        .{ .cond = .A, .flags = .{ .N = false, .Z = false, .C = false, .V = false }, .expect_taken = true },
+    };
+
+    for (cases) |c| {
+        cpu.reset(false);
+        cpu.registers.PC = 0x1000;
+        cpu.registers.SP = 0xFFFE;
+        cpu.registers.SR.raw = 0;
+        cpu.registers.SR.updateFlag(.N, c.flags.N);
+        cpu.registers.SR.updateFlag(.Z, c.flags.Z);
+        cpu.registers.SR.updateFlag(.C, c.flags.C);
+        cpu.registers.SR.updateFlag(.V, c.flags.V);
+
+        const cond_reg: RegistersName = @as(RegistersName, @enumFromInt(@intFromEnum(c.cond)));
+        const instr = Instruction.pack(0, .B, .REGISTER_IMM16, 0, cond_reg, .R0, 0, 0x0004);
+        try Instruction.B(&cpu, instr);
+
+        if (c.expect_taken) {
+            try expect(cpu.registers.PC == 0x1004);
+        } else {
+            try expect(cpu.registers.PC == 0x1000);
+        }
+        try expect(cpu.registers.SP == 0xFFFE);
+    }
+}
+
+test "B - PC relative negative offset" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+    cpu.registers.PC = 0x2000;
+    const instr = Instruction.pack(0, .B, .REGISTER_IMM16, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.A))), .R0, 0, 0xFFFC);
+    try Instruction.B(&cpu, instr);
+    try expect(cpu.registers.PC == 0x1FFC);
+}
+
+test "B - Link saves PC (PC relative)" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+    cpu.registers.PC = 0x3000;
+    cpu.registers.SP = 0xFFFE;
+    const instr = Instruction.pack(0, .B, .REGISTER_IMM16, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.A))), .R0, 1, 0x0004);
+    try Instruction.B(&cpu, instr);
+    try expect(cpu.registers.PC == 0x3004);
+    try expect(cpu.registers.SP == 0xFFFC);
+    try expect(cpu.ram.read16(0xFFFC) == 0x3000);
+}
+
+test "B - OFFSET_INDEXED taken" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R2), 0x4000);
+    cpu.registers.SR.updateFlag(.Z, false); // NE
+    const instr = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.NE))), .R2, 0, 0x0010);
+    try Instruction.B(&cpu, instr);
+    try expect(cpu.registers.PC == 0x4010);
+}
+
+test "B - OFFSET_INDEXED not taken" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+    cpu.registers.PC = 0x5555;
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R4), 0x1234);
+    cpu.registers.SR.updateFlag(.Z, false);
+    const instr = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.EQ))), .R4, 0, 0x0004);
+    try Instruction.B(&cpu, instr);
+    try expect(cpu.registers.PC == 0x5555);
+    try expect(cpu.registers.SP == 0xFFFE);
+}
+
+test "B - OFFSET_INDEXED link and negative offset" {
+    const allocator = std.testing.allocator;
+    var cpu = try CPU.init(allocator);
+    defer cpu.deinit(allocator);
+
+    cpu.reset(false);
+    cpu.registers.PC = 0x6000;
+    cpu.registers.SP = 0xFFFE;
+    cpu.registers.writeRegister(@intFromEnum(RegistersName.R3), 0x5000);
+    const instr = Instruction.pack(0, .B, .OFFSET_INDEXED, 0, @as(RegistersName, @enumFromInt(@intFromEnum(Condition.A))), .R3, 1, 0xFFF0);
+    try Instruction.B(&cpu, instr);
+    try expect(cpu.registers.PC == 0x4FF0);
+    try expect(cpu.registers.SP == 0xFFFC);
+    try expect(cpu.ram.read16(0xFFFC) == 0x6000);
 }

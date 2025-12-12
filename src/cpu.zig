@@ -5,6 +5,7 @@ const expect = std.testing.expect;
 const Ram = @import("memory.zig").Ram;
 const Rom = @import("memory.zig").Rom;
 pub const Instruction = @import("instruction.zig").Instruction;
+pub const assembler = @import("assembler.zig");
 
 pub const CPU = struct {
     registers: Registers,

@@ -2,8 +2,8 @@
 const std = @import("std");
 const native_endian = @import("builtin").target.cpu.arch.endian();
 const expect = std.testing.expect;
-const Ram = @import("memory.zig").Ram;
-const Rom = @import("memory.zig").Rom;
+pub const Ram = @import("memory.zig").Ram;
+pub const Rom = @import("memory.zig").Rom;
 pub const Instruction = @import("instruction.zig").Instruction;
 pub const assembler = @import("assembler.zig");
 

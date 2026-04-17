@@ -1,4 +1,8 @@
 const std = @import("std");
+const Instruction = @import("instruction.zig").Instruction;
+const Opcode = @import("instruction.zig").Opcode;
+const Mode = @import("instruction.zig").Mode;
+const RegistersName = @import("cpu.zig").RegistersName;
 
 // ============================================================================
 // Error Types
@@ -8,6 +12,9 @@ pub const AsmError = error{
     InvalidSyntax,
     FileNotFound,
     FileReadError,
+    InvalidRegister,
+    InvalidImmediate,
+    InvalidOpcode,
 };
 
 pub const TokenError = struct {
@@ -15,6 +22,61 @@ pub const TokenError = struct {
     token_idx: usize,
     token: []const u8,
     reason: []const u8,
+};
+
+// ============================================================================
+// Intermediate Representation
+// ============================================================================
+
+pub const ParsedLine = struct {
+    line_num: usize,
+    label: ?[]const u8,
+    directive: ?[]const u8,
+    instruction: ?ParsedInstruction,
+    raw_line: []const u8,
+};
+
+pub const ParsedInstruction = struct {
+    opcode: []const u8,
+    operands: [][]const u8,
+    line_num: usize,
+
+    pub fn deinit(self: ParsedInstruction, allocator: std.mem.Allocator) void {
+        for (self.operands) |op| {
+            allocator.free(op);
+        }
+        allocator.free(self.operands);
+        allocator.free(self.opcode);
+    }
+};
+
+pub const CompiledInstruction = struct {
+    address: u16,
+    bytecode: u32,
+    line_num: usize,
+    raw_line: []const u8,
+};
+
+pub const SymbolTable = struct {
+    symbols: std.StringHashMap(u16),
+
+    pub fn init(allocator: std.mem.Allocator) SymbolTable {
+        return .{
+            .symbols = std.StringHashMap(u16).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *SymbolTable) void {
+        self.symbols.deinit();
+    }
+
+    pub fn put(self: *SymbolTable, name: []const u8, address: u16) !void {
+        try self.symbols.put(name, address);
+    }
+
+    pub fn get(self: *SymbolTable, name: []const u8) ?u16 {
+        return self.symbols.get(name);
+    }
 };
 
 // ============================================================================
@@ -489,6 +551,434 @@ pub fn assembleFromFile(allocator: std.mem.Allocator, file_path: []const u8) (As
     defer allocator.free(source);
 
     try assembleFromBuffer(allocator, source);
+}
+
+// ============================================================================
+// First Pass - Parse and Encode Instructions
+// ============================================================================
+
+pub fn firstPass(allocator: std.mem.Allocator, source: []const u8) !std.ArrayList(ParsedLine) {
+    var parsed_lines: std.ArrayList(ParsedLine) = .{};
+    try parsed_lines.ensureTotalCapacity(allocator, 0);
+    errdefer {
+        for (parsed_lines.items) |line| {
+            if (line.label) |lbl| allocator.free(lbl);
+            if (line.directive) |dir| allocator.free(dir);
+            if (line.instruction) |instr| instr.deinit(allocator);
+        }
+        parsed_lines.deinit(allocator);
+    }
+
+    var line_iter = std.mem.tokenizeAny(u8, source, "\n\r");
+    var line_num: usize = 1;
+
+    while (line_iter.next()) |raw_line| {
+        const normalized = try normalizeLine(allocator, raw_line);
+        defer allocator.free(normalized);
+
+        // Skip empty lines
+        if (normalized.len == 0) {
+            line_num += 1;
+            continue;
+        }
+
+        const tokens = try tokenizeLine(allocator, normalized);
+        defer {
+            for (tokens) |token| allocator.free(token);
+            allocator.free(tokens);
+        }
+
+        // Validate tokens
+        if (try validateTokens(allocator, tokens, line_num)) |err| {
+            printTokenError(err, raw_line);
+            allocator.free(err.token);
+            allocator.free(err.reason);
+            return AsmError.InvalidSyntax;
+        }
+
+        // Parse the line
+        var parsed = ParsedLine{
+            .line_num = line_num,
+            .label = null,
+            .directive = null,
+            .instruction = null,
+            .raw_line = raw_line,
+        };
+
+        var token_idx: usize = 0;
+
+        // Check for label
+        if (tokens.len > 0 and std.mem.endsWith(u8, tokens[0], ":")) {
+            parsed.label = try allocator.dupe(u8, tokens[0][0 .. tokens[0].len - 1]);
+            token_idx += 1;
+        }
+
+        // Check for directive or instruction
+        if (token_idx < tokens.len) {
+            if (tokens[token_idx][0] == '.') {
+                // Directive
+                parsed.directive = try allocator.dupe(u8, tokens[token_idx]);
+            } else {
+                // Instruction - validate pattern first
+                if (try validateInstructionPattern(allocator, tokens[token_idx..], line_num)) |err| {
+                    printTokenError(err, raw_line);
+                    allocator.free(err.token);
+                    allocator.free(err.reason);
+                    return AsmError.InvalidSyntax;
+                }
+
+                // Create parsed instruction
+                const opcode = try allocator.dupe(u8, tokens[token_idx]);
+                var operands: std.ArrayList([]const u8) = .{};
+                try operands.ensureTotalCapacity(allocator, 0);
+
+                token_idx += 1;
+                while (token_idx < tokens.len) : (token_idx += 1) {
+                    try operands.append(allocator, try allocator.dupe(u8, tokens[token_idx]));
+                }
+
+                parsed.instruction = ParsedInstruction{
+                    .opcode = opcode,
+                    .operands = try operands.toOwnedSlice(allocator),
+                    .line_num = line_num,
+                };
+            }
+        }
+
+        try parsed_lines.append(allocator, parsed);
+        line_num += 1;
+    }
+
+    return parsed_lines;
+}
+
+// ============================================================================
+// Second Pass - Symbol Resolution and Bytecode Generation
+// ============================================================================
+
+pub fn secondPass(
+    allocator: std.mem.Allocator,
+    parsed_lines: []const ParsedLine,
+) !struct { instructions: std.ArrayList(CompiledInstruction), symbols: SymbolTable } {
+    var symbols = SymbolTable.init(allocator);
+    errdefer symbols.deinit();
+
+    var instructions: std.ArrayList(CompiledInstruction) = .{};
+    try instructions.ensureTotalCapacity(allocator, 0);
+    errdefer {
+        instructions.deinit(allocator);
+    }
+
+    var current_address: u16 = 0;
+
+    // First sub-pass: Build symbol table and calculate addresses
+    for (parsed_lines) |line| {
+        // Handle .ORG directive
+        if (line.directive) |dir| {
+            if (std.mem.eql(u8, dir, ".ORG")) {
+                // Next line should have the address
+                // For now, assume .ORG is followed by address on same line
+                // This is a simplified implementation
+                continue;
+            }
+            // Other directives don't affect address calculation for now
+            continue;
+        }
+
+        // Store label address (label already has ':' removed from firstPass)
+        if (line.label) |label| {
+            try symbols.put(label, current_address);
+        }
+
+        // Instructions occupy 4 bytes (32-bit bytecode)
+        if (line.instruction != null) {
+            current_address += 4;
+        }
+    }
+
+    // Second sub-pass: Generate bytecode with resolved symbols
+    current_address = 0;
+    for (parsed_lines) |line| {
+        if (line.directive != null) {
+            continue;
+        }
+
+        if (line.instruction) |instr| {
+            // Encode the instruction with symbol resolution
+            const bytecode = try encodeInstructionWithSymbols(allocator, instr, &symbols, current_address);
+
+            try instructions.append(allocator, CompiledInstruction{
+                .address = current_address,
+                .bytecode = bytecode,
+                .line_num = line.line_num,
+                .raw_line = line.raw_line,
+            });
+
+            current_address += 4;
+        }
+    }
+
+    return .{
+        .instructions = instructions,
+        .symbols = symbols,
+    };
+}
+
+// Helper functions for encoding
+
+fn parseRegister(text: []const u8) !RegistersName {
+    if (std.mem.eql(u8, text, "SP")) return .R14;
+    if (std.mem.eql(u8, text, "PC")) return .R15;
+    if (std.mem.eql(u8, text, "SR")) return .R13;
+
+    if (text[0] == 'R' and text.len >= 2 and text.len <= 3) {
+        const num = try std.fmt.parseInt(u8, text[1..], 10);
+        if (num <= 15) {
+            return @enumFromInt(num);
+        }
+    }
+
+    return AsmError.InvalidRegister;
+}
+
+fn parseImmediate(text: []const u8) !u16 {
+    const value = std.fmt.parseInt(i32, text, 0) catch return AsmError.InvalidImmediate;
+    return @intCast(@as(u32, @bitCast(value)) & 0xFFFF);
+}
+
+fn encodeInstruction(allocator: std.mem.Allocator, instr: ParsedInstruction) !u32 {
+    _ = allocator;
+
+    // Map opcode string to Opcode enum
+    const opcode = if (std.mem.eql(u8, instr.opcode, "ADD"))
+        Opcode.ADD
+    else if (std.mem.eql(u8, instr.opcode, "SUB"))
+        Opcode.SUB
+    else if (std.mem.eql(u8, instr.opcode, "LD"))
+        Opcode.LD
+    else if (std.mem.eql(u8, instr.opcode, "ST"))
+        Opcode.ST
+    else if (std.mem.eql(u8, instr.opcode, "MUL"))
+        Opcode.MUL
+    else if (std.mem.eql(u8, instr.opcode, "DIV"))
+        Opcode.DIV
+    else if (std.mem.eql(u8, instr.opcode, "AND"))
+        Opcode.AND
+    else if (std.mem.eql(u8, instr.opcode, "OR"))
+        Opcode.OR
+    else if (std.mem.eql(u8, instr.opcode, "XOR"))
+        Opcode.XOR
+    else if (std.mem.eql(u8, instr.opcode, "ROL"))
+        Opcode.ROL
+    else if (std.mem.eql(u8, instr.opcode, "ROR"))
+        Opcode.ROR
+    else if (std.mem.eql(u8, instr.opcode, "LSL"))
+        Opcode.LSL
+    else if (std.mem.eql(u8, instr.opcode, "LSR"))
+        Opcode.LSR
+    else if (instr.opcode[0] == 'B')
+        Opcode.B
+    else
+        return AsmError.InvalidOpcode;
+
+    // Simple encoding for now - need to parse operands and determine mode
+    // This is a placeholder that creates a basic instruction
+    const instruction = Instruction.pack(
+        0, // arch
+        opcode,
+        Mode.REGISTER_IMM16,
+        1, // size (WORD)
+        .R0, // rd
+        .R0, // rs
+        0, // fl
+        0, // imm16
+    );
+
+    return instruction.raw;
+}
+
+fn stringToOpcode(opcode_str: []const u8) !Opcode {
+    if (std.mem.eql(u8, opcode_str, "ADD")) return Opcode.ADD;
+    if (std.mem.eql(u8, opcode_str, "ADC")) return Opcode.ADD; // ADC is ADD variant
+    if (std.mem.eql(u8, opcode_str, "SUB")) return Opcode.SUB;
+    if (std.mem.eql(u8, opcode_str, "SBC")) return Opcode.SUB; // SBC is SUB variant
+    if (std.mem.eql(u8, opcode_str, "LD")) return Opcode.LD;
+    if (std.mem.eql(u8, opcode_str, "LDM")) return Opcode.LD; // LDM is LD variant
+    if (std.mem.eql(u8, opcode_str, "ST")) return Opcode.ST;
+    if (std.mem.eql(u8, opcode_str, "MUL")) return Opcode.MUL;
+    if (std.mem.eql(u8, opcode_str, "MULX")) return Opcode.MUL; // MULX is MUL variant
+    if (std.mem.eql(u8, opcode_str, "DIV")) return Opcode.DIV;
+    if (std.mem.eql(u8, opcode_str, "DIVX")) return Opcode.DIV; // DIVX is DIV variant
+    if (std.mem.eql(u8, opcode_str, "AND")) return Opcode.AND;
+    if (std.mem.eql(u8, opcode_str, "OR")) return Opcode.OR;
+    if (std.mem.eql(u8, opcode_str, "XOR")) return Opcode.XOR;
+    if (std.mem.eql(u8, opcode_str, "ROL")) return Opcode.ROL;
+    if (std.mem.eql(u8, opcode_str, "ROR")) return Opcode.ROR;
+    if (std.mem.eql(u8, opcode_str, "LSL")) return Opcode.LSL;
+    if (std.mem.eql(u8, opcode_str, "LSR")) return Opcode.LSR;
+    if (std.mem.eql(u8, opcode_str, "ASR")) return Opcode.LSR; // ASR is LSR variant
+    if (std.mem.eql(u8, opcode_str, "TST")) return Opcode.AND; // TST is AND variant (no writeback)
+    if (std.mem.eql(u8, opcode_str, "SWI")) return Opcode.SWI;
+    if (opcode_str.len > 1 and opcode_str[0] == 'B') return Opcode.B;
+
+    return AsmError.InvalidOpcode;
+}
+
+fn encodeInstructionWithSymbols(
+    allocator: std.mem.Allocator,
+    instr: ParsedInstruction,
+    symbols: *SymbolTable,
+    current_address: u16,
+) !u32 {
+    _ = allocator;
+
+    const opcode = try stringToOpcode(instr.opcode);
+
+    // Determine instruction encoding based on operand count and types
+    const operand_count = instr.operands.len;
+
+    if (operand_count == 0) {
+        return AsmError.InvalidSyntax;
+    }
+
+    // Classify operands
+    const op0_type = Token.classify(instr.operands[0]).type;
+    const op1_type = if (operand_count > 1) Token.classify(instr.operands[1]).type else .unknown;
+
+    // Handle branches (opcode B with various conditions)
+    if (opcode == .B) {
+        // Branch target is in operand[0] (for simple branch) or operand[1] (for BPR compare)
+        const is_bpr = std.mem.eql(u8, instr.opcode, "BPR");
+
+        if (is_bpr and operand_count == 2) {
+            // BPR Rd, Rs - compare and branch on positive result
+            const rd = try parseRegister(instr.operands[0]);
+            const rs = try parseRegister(instr.operands[1]);
+
+            // BPR uses Mode.REGISTER_IMM16 with imm16=0 for register-register
+            const instruction = Instruction.pack(
+                0, // arch
+                opcode,
+                Mode.REGISTER_IMM16,
+                1, // size (WORD)
+                rd,
+                rs,
+                0, // fl (condition code extracted from opcode string)
+                0, // imm16 = 0
+            );
+            return instruction.raw;
+        } else if (operand_count == 1) {
+            // Simple branch: Bcc label
+            const target = instr.operands[0];
+            var imm16: u16 = 0;
+
+            // Check if target is a label
+            if (op0_type == .label or (!isImmediate(target) and !isRegister(target))) {
+                // Try to resolve label
+                if (symbols.get(target)) |target_address| {
+                    // Calculate relative offset
+                    const offset = @as(i32, target_address) - @as(i32, current_address + 4);
+                    imm16 = @intCast(@as(u32, @bitCast(offset)) & 0xFFFF);
+                } else {
+                    // Label not found - could be forward reference
+                    // For now, use 0 and would need another pass to fix
+                    imm16 = 0;
+                }
+            } else {
+                // Direct immediate address
+                imm16 = try parseImmediate(target);
+            }
+
+            const instruction = Instruction.pack(
+                0, // arch
+                opcode,
+                Mode.REGISTER_IMM16,
+                1, // size (WORD)
+                .R0, // rd (not used for simple branch)
+                .R0, // rs (not used)
+                0, // fl (condition code)
+                imm16,
+            );
+            return instruction.raw;
+        }
+    }
+
+    // Two-operand instructions
+    if (operand_count == 2) {
+        const rd = try parseRegister(instr.operands[0]);
+
+        // Rd, Rs (register-register mode)
+        if (op1_type == .register) {
+            const rs = try parseRegister(instr.operands[1]);
+
+            // Register-register uses Mode.REGISTER_IMM16 with imm16=0
+            const instruction = Instruction.pack(
+                0, // arch
+                opcode,
+                Mode.REGISTER_IMM16,
+                1, // size (WORD)
+                rd,
+                rs,
+                0, // fl
+                0, // imm16 = 0 indicates register-register
+            );
+            return instruction.raw;
+        }
+
+        // Rd, #immediate (register-immediate mode)
+        if (op1_type == .immediate) {
+            const imm16 = try parseImmediate(instr.operands[1]);
+
+            // Immediate mode uses Mode.REGISTER_IMM16 with rs=R0
+            const instruction = Instruction.pack(
+                0, // arch
+                opcode,
+                Mode.REGISTER_IMM16,
+                1, // size (WORD)
+                rd,
+                .R0, // rs = 0 indicates immediate mode
+                0, // fl
+                imm16,
+            );
+            return instruction.raw;
+        }
+
+        // Handle label references (e.g., ADD R1, LOOP)
+        if (op1_type == .label or (!isImmediate(instr.operands[1]) and !isRegister(instr.operands[1]))) {
+            const label = instr.operands[1];
+            var imm16: u16 = 0;
+
+            if (symbols.get(label)) |address| {
+                imm16 = address;
+            }
+
+            const instruction = Instruction.pack(
+                0, // arch
+                opcode,
+                Mode.REGISTER_IMM16,
+                1, // size (WORD)
+                rd,
+                .R0, // rs
+                0, // fl
+                imm16,
+            );
+            return instruction.raw;
+        }
+    }
+
+    // Default fallback
+    const instruction = Instruction.pack(
+        0, // arch
+        opcode,
+        Mode.REGISTER_IMM16,
+        1, // size (WORD)
+        .R0, // rd
+        .R0, // rs
+        0, // fl
+        0, // imm16
+    );
+
+    return instruction.raw;
 }
 
 // ============================================================================
